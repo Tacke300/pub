@@ -5,7 +5,6 @@ import axios from 'axios';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
-import { API_KEY, SECRET_KEY } from './config.js';
 import ccxt from 'ccxt';
 
 const PORT = 8080;
@@ -69,7 +68,7 @@ const __dirname = path.dirname(__filename);
 const POSITIONS_FILE = path.join(__dirname, 'positions.json');
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 
-const binanceApi = axios.create({ baseURL: 'https://fapi.binance.com', timeout: 15000, headers: { 'X-MBX-APIKEY': API_KEY } });
+const binanceApi = axios.create({ baseURL: 'https://fapi.binance.com', timeout: 15000 });
 
 let sharedState = {
     blackList: {},
@@ -101,10 +100,22 @@ function parseNormalizedSettings(reqBody, currentSettings) {
     return normalized;
 }
 
+function updateExchangeKeys(botInst) {
+    if (botInst.botSettings.apiKey) {
+        botInst.exchange.apiKey = botInst.botSettings.apiKey;
+        botInst.binanceApi.defaults.headers['X-MBX-APIKEY'] = botInst.botSettings.apiKey;
+    }
+    if (botInst.botSettings.secretKey) {
+        botInst.exchange.secret = botInst.botSettings.secretKey;
+    }
+}
+
 let bot = {
     id: "LUFFY_BOT",
     startTime: Date.now(),
     botSettings: {
+        apiKey: "",
+        secretKey: "",
         isRunning: false,
         enableEarlySL: false,
         lockDcaAmMode: false,
@@ -133,8 +144,8 @@ let bot = {
     isMarginProtected: false,
     isAntiLiquidationTriggered: false,
     isPnlPaused: false,
-    exchange: new ccxt.binance({ apiKey: API_KEY, secret: SECRET_KEY, enableRateLimit: true, options: { defaultType: 'future', dualSidePosition: true, recvWindow: 60000, adjustForTimeDifference: true } }),
-    binanceApi: axios.create({ baseURL: 'https://fapi.binance.com', timeout: 15000, headers: { 'X-MBX-APIKEY': API_KEY } })
+    exchange: new ccxt.binance({ enableRateLimit: true, options: { defaultType: 'future', dualSidePosition: true, recvWindow: 60000, adjustForTimeDifference: true } }),
+    binanceApi: axios.create({ baseURL: 'https://fapi.binance.com', timeout: 15000 })
 };
 
 function calculateDcaDuongMargin(botInst, b) {
@@ -340,7 +351,10 @@ function loadSettingsFromFile() {
         if (!fs.existsSync(SETTINGS_FILE)) return;
         const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
         const data = JSON.parse(raw);
-        if (data) bot.botSettings = parseNormalizedSettings(data, bot.botSettings);
+        if (data) {
+            bot.botSettings = parseNormalizedSettings(data, bot.botSettings);
+            updateExchangeKeys(bot);
+        }
     } catch (e) {}
 }
 
@@ -368,7 +382,7 @@ async function binancePrivate(botInst, endpoint, method = 'GET', data = {}) {
     try {
         const timestamp = Date.now() + botInst.timestampOffset;
         const query = new URLSearchParams({ ...data, timestamp, recvWindow: 60000 }).toString(); 
-        const signature = crypto.createHmac('sha256', SECRET_KEY).update(query).digest('hex');
+        const signature = crypto.createHmac('sha256', botInst.botSettings.secretKey || '').update(query).digest('hex');
         const response = await botInst.binanceApi({ method, url: `${endpoint}?${query}&signature=${signature}` });
         return response.data;
     } catch (e) {
@@ -657,7 +671,6 @@ async function priceMonitor(botInst) {
 
                 savePositionsToFile();
 
-                // 0. KIỂM TRA CHẾ ĐỘ CẮT LỖ SỚM
                 if (botInst.botSettings.enableEarlySL && (b.dcaDuongCount || 0) >= 1) {
                     const earlySlTarget = b.side === 'LONG' 
                         ? (currentAvgEntry + (b.firstEntry * 0.0097))
@@ -677,7 +690,6 @@ async function priceMonitor(botInst) {
                     }
                 }
 
-                // 1. KIỂM TRA CHỐT LÃI TP DCA ÂM
                 if (currentDcaMode === 'AM') {
                     const targetTpPrice = currentAvgEntry + dir * (b.firstEntry * (tpDcaAmPct / 100));
                     const hitInternalTP = b.side === 'LONG' ? (markP >= targetTpPrice) : (markP <= targetTpPrice);
@@ -695,7 +707,6 @@ async function priceMonitor(botInst) {
                     }
                 }
 
-                // 2. KIỂM TRA CHỐT LÃI TP DCA DƯƠNG
                 if (currentDcaMode === 'DUONG') {
                     const dropThreshold = b.firstEntry * (tpDcaDuongPct / 100);
                     const minDcaCount = botInst.botSettings.minDcaDuongCount !== undefined ? botInst.botSettings.minDcaDuongCount : 10;
@@ -721,7 +732,6 @@ async function priceMonitor(botInst) {
                     }
                 }
 
-                // 3. KIỂM TRA CẮT LỖ SL NỘI BỘ
                 const hitInternalSL = b.side === 'LONG' ? (markP <= b.sl) : (markP >= b.sl);
                 if (hitInternalSL) {
                     queueClosePosition(botInst, b, markP, "CẮT LỖ SL NỘI BỘ");
@@ -731,7 +741,6 @@ async function priceMonitor(botInst) {
                 const isDcaCooldown = b.lastDcaTime && (now - b.lastDcaTime < 8000);
                 if (isDcaCooldown) continue;
 
-                // 4. KÍCH HOẠT NHỒI LỆNH DCA ÂM
                 if (b.pnl < 0 && !b.isLockedAm) {
                     const hitDcaAm = b.side === 'LONG' ? (markP <= b.nextDcaAm) : (markP >= b.nextDcaAm);
                     if (hitDcaAm && !botInst.isProcessingDCA.has(lockKey)) {
@@ -742,7 +751,6 @@ async function priceMonitor(botInst) {
                     }
                 }
 
-                // 5. KÍCH HOẠT NHỒI LỆNH DCA DƯƠNG
                 if (!b.isLockedAm) {
                     const isDcaDuongValid = b.side === 'LONG' ? (markP > currentAvgEntry) : (markP < currentAvgEntry);
                     if (b.pnl > 0 && isDcaDuongValid) {
@@ -1167,6 +1175,7 @@ async function buildStatusResponse(botInst) {
 
 appServer.post('/api/settings', (req, res) => {
     bot.botSettings = parseNormalizedSettings(req.body, bot.botSettings);
+    updateExchangeKeys(bot);
     saveSettingsToFile();
     res.json({ success: true, msg: "Cập nhật cấu hình thành công!" });
 });
@@ -1299,6 +1308,7 @@ async function syncPositionsWithExchange() {
 
 async function init() {
     try {
+        loadSettingsFromFile();
         await bot.exchange.loadMarkets(); 
         
         const info = await binanceApi.get('/fapi/v1/exchangeInfo');
@@ -1315,7 +1325,6 @@ async function init() {
         });
         sharedState.exchangeInfo = temp; 
         
-        loadSettingsFromFile();
         loadPositionsFromFile();
 
         await syncPositionsWithExchange();
