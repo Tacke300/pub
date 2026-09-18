@@ -490,6 +490,59 @@ async function binancePrivate(botInst, endpoint, method = 'GET', data = {}) {
     }
 }
 
+async function getExactCloseReason(botInst, symbol, side) {
+    try {
+        const forceOrders = await binancePrivate(botInst, '/fapi/v1/forceOrders', 'GET', { symbol, limit: 5 }).catch(() => []);
+        if (Array.isArray(forceOrders) && forceOrders.length > 0) {
+            const liq = forceOrders.find(o => o.positionSide === side || o.symbol === symbol);
+            if (liq) {
+                return `BỊ THANH LÝ (LIQUIDATED) BỞI SÀN | Giá thanh lý: ${formatPrice(liq.price || liq.avgPrice)} | Số lượng: ${liq.executedQty}`;
+            }
+        }
+
+        const allOrders = await binancePrivate(botInst, '/fapi/v1/allOrders', 'GET', { symbol, limit: 10 }).catch(() => []);
+        if (Array.isArray(allOrders) && allOrders.length > 0) {
+            const filledOrders = allOrders
+                .filter(o => o.positionSide === side && o.status === 'FILLED')
+                .sort((a, b) => b.updateTime - a.updateTime);
+
+            if (filledOrders.length > 0) {
+                const lastOrder = filledOrders[0];
+                const orderType = lastOrder.type;
+                const avgPrice = parseFloat(lastOrder.avgPrice || lastOrder.price || 0);
+                const clientOrderId = lastOrder.clientOrderId || '';
+
+                if (orderType === 'LIQUIDATION') {
+                    return `BỊ THANH LÝ (LIQUIDATED) BỞI SÀN | Giá: ${formatPrice(avgPrice)}`;
+                } else if (orderType === 'STOP_MARKET' || orderType === 'STOP') {
+                    return `CẮN CẮT LỖ (SL SÀN) | Loại: ${orderType} | Giá khớp: ${formatPrice(avgPrice)}`;
+                } else if (orderType === 'TAKE_PROFIT_MARKET' || orderType === 'TAKE_PROFIT') {
+                    return `CẮN CHỐT LÃI (TP SÀN) | Loại: ${orderType} | Giá khớp: ${formatPrice(avgPrice)}`;
+                } else if (orderType === 'MARKET' || orderType === 'LIMIT') {
+                    if (clientOrderId.startsWith('web_') || clientOrderId.startsWith('android_') || clientOrderId.startsWith('ios_') || clientOrderId.startsWith('electron_')) {
+                        return `ĐÓNG THỦ CÔNG TỪ APPS/WEB BINANCE | Giá khớp: ${formatPrice(avgPrice)}`;
+                    } else if (clientOrderId.includes('x-xcKqS3nA') || clientOrderId.startsWith('autoclose') || clientOrderId.startsWith('adl')) {
+                        return `SÀN TỰ ĐỘNG ĐÓNG / ADL (Auto-Deleveraging) | Giá khớp: ${formatPrice(avgPrice)}`;
+                    } else {
+                        return `LỆNH ${orderType} ĐÃ KHỚP TRÊN SÀN (Client ID: ${clientOrderId}) | Giá khớp: ${formatPrice(avgPrice)}`;
+                    }
+                }
+            }
+        }
+
+        const trades = await binancePrivate(botInst, '/fapi/v1/userTrades', 'GET', { symbol, limit: 5 }).catch(() => []);
+        if (Array.isArray(trades) && trades.length > 0) {
+            const closeSide = side === 'LONG' ? 'SELL' : 'BUY';
+            const lastTrade = trades.filter(t => t.positionSide === side && t.side === closeSide).pop();
+            if (lastTrade) {
+                const pnl = parseFloat(lastTrade.realizedPnl || 0);
+                return `ĐÃ ĐÓNG TRÊN SÀN | PnL Thực Nhận: ${pnl.toFixed(2)}$ | Giá khớp: ${formatPrice(lastTrade.price)}`;
+            }
+        }
+    } catch (e) { }
+    return `KHÔNG TÌM THẤY VỊ THẾ TRÊN SÀN (Đã đóng ngoài tầm kiểm soát của bot hoặc mất kết nối API)`;
+}
+
 setInterval(() => {
     const now = Date.now();
     for (const symbol in sharedState.blackList) {
@@ -1018,16 +1071,42 @@ async function priceMonitor(botInst) {
                 }
             } else {
                 const ageMs = Date.now() - (b.createdAt || 0);
-                if (ageMs < 20000) {
+                if (ageMs < 2000) {
                     continue;
                 }
 
                 if (!botInst.isProcessingDCA.has(lockKey)) {
-                    const formattedSymbol = formatCoinName(b.symbol);
-                    addBotLog(botInst, `⚠️ [MẤT VỊ THẾ SÀN] Vị thế ${formattedSymbol} ${b.side} không còn tồn tại trên Binance (đã đóng thủ công trên Binance, cắn SL/TP sàn hoặc bị thanh lý). Xóa khỏi bộ nhớ bot.`, "warn");
-                    botInst.botActivePositions.delete(key); 
-                    savePositionsToFile();
-                    checkAndAddBlacklist(b.symbol);
+                    b.isClosing = true;
+                    botInst.isProcessingDCA.add(lockKey);
+
+                    (async () => {
+                        try {
+                            const exactReason = await getExactCloseReason(botInst, b.symbol, b.side);
+                            const formattedSymbol = formatCoinName(b.symbol);
+                            addBotLog(botInst, `⚠️ [MẤT VỊ THẾ SÀN] Vị thế ${formattedSymbol} ${b.side} không còn tồn tại trên Binance. Lý do chính xác: ${exactReason}`, "warn");
+
+                            try {
+                                const trades = await binancePrivate(botInst, '/fapi/v1/userTrades', 'GET', { symbol: b.symbol, limit: 10 });
+                                if (Array.isArray(trades) && trades.length > 0) {
+                                    const closeSide = b.side === 'LONG' ? 'SELL' : 'BUY';
+                                    const matchingTrades = trades.filter(t => t.positionSide === b.side && (t.side === closeSide || (b.side === 'LONG' ? t.buyer === false : t.buyer === true)));
+                                    if (matchingTrades.length > 0) {
+                                        const realPnL = matchingTrades.reduce((sum, t) => sum + parseFloat(t.realizedPnl) - parseFloat(t.commission || 0), 0);
+                                        botInst.status.botClosedCount++;
+                                        botInst.status.botPnLClosed += realPnL;
+                                        if (realPnL >= 0) botInst.status.pnlGain = (botInst.status.pnlGain || 0) + realPnL;
+                                        else botInst.status.pnlLoss = (botInst.status.pnlLoss || 0) + realPnL;
+                                    }
+                                }
+                            } catch (errPnl) {}
+
+                            botInst.botActivePositions.delete(key); 
+                            savePositionsToFile();
+                            checkAndAddBlacklist(b.symbol);
+                        } finally {
+                            botInst.isProcessingDCA.delete(lockKey);
+                        }
+                    })();
                 }
             }
         }
@@ -1567,9 +1646,19 @@ async function syncPositionsWithExchange() {
         for (let [key, pos] of Array.from(bot.botActivePositions.entries())) {
             if (!activeKeysOnExchange.has(key)) {
                 const ageMs = Date.now() - (pos.createdAt || 0);
-                if (ageMs > 20000 && !bot.isProcessingDCA.has(key)) {
-                    addBotLog(bot, `⚠️ [ĐỒNG BỘ SÀN] Vị thế ${formatCoinName(pos.symbol)} ${pos.side} không còn trên Binance. Xóa khỏi bộ nhớ bot.`, "warn");
-                    bot.botActivePositions.delete(key);
+                if (ageMs > 2000 && !bot.isProcessingDCA.has(key)) {
+                    pos.isClosing = true;
+                    bot.isProcessingDCA.add(key);
+
+                    (async () => {
+                        try {
+                            const exactReason = await getExactCloseReason(bot, pos.symbol, pos.side);
+                            addBotLog(bot, `⚠️ [ĐỒNG BỘ SÀN] Vị thế ${formatCoinName(pos.symbol)} ${pos.side} không còn trên Binance. Lý do chính xác: ${exactReason}`, "warn");
+                            bot.botActivePositions.delete(key);
+                        } finally {
+                            bot.isProcessingDCA.delete(key);
+                        }
+                    })();
                 }
             } else {
                 const realP = realActivePositions.find(p => `${p.symbol}_${p.positionSide}` === key);
