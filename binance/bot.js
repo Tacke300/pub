@@ -80,7 +80,8 @@ let sharedState = {
     errorSpamGuard: {}, 
     pendingOrders: new Set(),
     lastClosedMargin: {},
-    lastClosedPnl: {}
+    lastClosedPnl: {},
+    lastOpenTime: 0
 };
 
 function parseNormalizedSettings(reqBody, currentSettings) {
@@ -406,6 +407,21 @@ async function setLeverageIfNeeded(botInst, symbol, maxLeverage) {
         await botInst.exchange.setLeverage(maxLeverage, symbol);
         leverageSetCache.add(key);
     } catch (e) { }
+}
+
+const marginTypeSetCache = new Set();
+async function setMarginTypeIfNeeded(botInst, symbol) {
+    const key = `${botInst.id}_${symbol}_CROSSED`;
+    if (marginTypeSetCache.has(key)) return;
+    try {
+        await binancePrivate(botInst, '/fapi/v1/marginType', 'POST', { symbol, marginType: 'CROSSED' });
+        marginTypeSetCache.add(key);
+    } catch (e) {
+        const msg = e?.response?.data?.msg || e?.message || String(e);
+        if (msg.includes('-4046') || msg.includes('No need to change margin type')) {
+            marginTypeSetCache.add(key);
+        }
+    }
 }
 
 function savePositionsToFile() {
@@ -1177,6 +1193,7 @@ async function openPosition(botInst, symbol, dcaData = null, forcedSide = 'LONG'
             }
         } catch (chkErr) {}
 
+        await setMarginTypeIfNeeded(botInst, symbol);
         await setLeverageIfNeeded(botInst, symbol, info.maxLeverage);
         
         let order = null;
@@ -1297,6 +1314,7 @@ async function openPosition(botInst, symbol, dcaData = null, forcedSide = 'LONG'
 }
 
 async function openPositionPair(botInst, symbol, signalVols = null) {
+    sharedState.lastOpenTime = Date.now();
     const info = sharedState.exchangeInfo[symbol];
     if (!info) return;
 
@@ -1733,6 +1751,8 @@ setInterval(async () => {
     await checkMarginLimits(bot);
     if (!bot.status.isReady || !bot.botSettings.isRunning || bot.isMarginProtected || bot.isPnlPaused) return;
     if (bot.antiLiquidationCooldownUntil && Date.now() < bot.antiLiquidationCooldownUntil) return;
+
+    if (Date.now() - (sharedState.lastOpenTime || 0) < 10000) return;
 
     const uniqueActiveSymbols = new Set(Array.from(bot.botActivePositions.values()).map(p => p.symbol));
     if (uniqueActiveSymbols.size >= bot.botSettings.maxPositions || bot.isProcessingDCA.size > 0) return;
