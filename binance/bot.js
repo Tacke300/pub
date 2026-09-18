@@ -1197,93 +1197,109 @@ async function openPosition(botInst, symbol, dcaData = null, forcedSide = 'LONG'
         await setLeverageIfNeeded(botInst, symbol, info.maxLeverage);
         
         let order = null;
-        let actualFilledPrice = currentPrice;
+        let totalFilledQty = 0;
+        let totalFilledCost = 0;
 
         try {
             order = await botInst.exchange.createOrder(symbol, 'MARKET', side === 'SHORT' ? 'SELL' : 'BUY', qty.toFixed(info.quantityPrecision), undefined, { positionSide: side });
+            let filledP = order.average || order.price || parseFloat(order.info?.avgPrice) || currentPrice;
+            totalFilledQty = qty;
+            totalFilledCost = qty * filledP;
         } catch (orderErr) {
             const errMsg = orderErr?.response?.data?.msg || orderErr?.message || String(orderErr);
             const errCode = orderErr?.response?.data?.code || orderErr?.code;
 
-            if (errMsg.includes('2019') || errCode === -2019) {
+            if (errMsg.includes('4411') || errCode === -4411 || errMsg.toLowerCase().includes('tradfi')) {
+                addBotLog(botInst, `❌ [LỖI TRADFI] Tài khoản chưa đăng ký/ký thỏa thuận TradFi trên Binance (Mã lỗi 4411).`, "error");
+                return;
+            } else if (errMsg.includes('2019') || errCode === -2019) {
                 addBotLog(botInst, `⚠️ Lỗi 2019 (Ký quỹ không đủ) cho ${formatCoinName(symbol)} ${side}. Đang giảm 20% volume để gửi lại...`, "warn");
                 qty = Math.floor((qty * 0.8) / info.stepSize) * info.stepSize;
                 qty = Number(qty.toFixed(info.quantityPrecision));
                 if (qty * currentPrice >= actualMinNotional) {
                     order = await botInst.exchange.createOrder(symbol, 'MARKET', side === 'SHORT' ? 'SELL' : 'BUY', qty.toFixed(info.quantityPrecision), undefined, { positionSide: side });
+                    let filledP = order.average || order.price || parseFloat(order.info?.avgPrice) || currentPrice;
+                    totalFilledQty = qty;
+                    totalFilledCost = qty * filledP;
                 } else {
                     addBotLog(botInst, `❌ Ký quỹ quá nhỏ không đủ mở lệnh ${formatCoinName(symbol)} ${side} sau khi điều chỉnh.`, "error");
                     return;
                 }
             } else if (errMsg.includes('2027') || errCode === -2027) {
-                addBotLog(botInst, `⚠️ Gặp lỗi 2027 (Vượt giới hạn vị thế) cho ${formatCoinName(symbol)} ${side}. Chia nhỏ lệnh để mở...`, "warn");
-                let remainingQty = qty;
-                let filledQty = 0;
-                let filledCost = 0;
-                const numChunks = 4;
-                let chunkQty = Math.floor((qty / numChunks) / info.stepSize) * info.stepSize;
-                chunkQty = Number(chunkQty.toFixed(info.quantityPrecision));
+                addBotLog(botInst, `⚠️ Lỗi 2027 (Vượt giới hạn vị thế) cho ${formatCoinName(symbol)} ${side}. Đang chia nhỏ lệnh (5 lần) để mở tối đa margin cho phép...`, "warn");
+                
+                const numSplits = 5;
+                let subQty = Math.floor((qty / numSplits) / info.stepSize) * info.stepSize;
+                subQty = Number(subQty.toFixed(info.quantityPrecision));
 
-                if (chunkQty * currentPrice < actualMinNotional) {
-                    chunkQty = Math.ceil((actualMinNotional / currentPrice) / info.stepSize) * info.stepSize;
-                    chunkQty = Number(chunkQty.toFixed(info.quantityPrecision));
+                if (subQty * currentPrice < actualMinNotional) {
+                    subQty = Math.ceil((actualMinNotional / currentPrice) / info.stepSize) * info.stepSize;
+                    subQty = Number(subQty.toFixed(info.quantityPrecision));
                 }
 
-                let attempts = 0;
-                while (remainingQty >= chunkQty && chunkQty * currentPrice >= actualMinNotional && attempts < 6) {
-                    attempts++;
-                    const currentTryQty = Math.min(remainingQty, chunkQty);
+                for (let i = 0; i < numSplits; i++) {
+                    let remainingTargetQty = qty - totalFilledQty;
+                    if (remainingTargetQty <= 0) break;
+
+                    let currentSubQty = subQty;
+                    if (remainingTargetQty < currentSubQty) {
+                        currentSubQty = Math.floor(remainingTargetQty / info.stepSize) * info.stepSize;
+                        currentSubQty = Number(currentSubQty.toFixed(info.quantityPrecision));
+                    }
+
+                    if (currentSubQty * currentPrice < actualMinNotional) {
+                        if (totalFilledQty > 0) break;
+                        currentSubQty = Math.ceil((actualMinNotional / currentPrice) / info.stepSize) * info.stepSize;
+                        currentSubQty = Number(currentSubQty.toFixed(info.quantityPrecision));
+                    }
+
                     try {
-                        const subOrder = await botInst.exchange.createOrder(symbol, 'MARKET', side === 'SHORT' ? 'SELL' : 'BUY', currentTryQty.toFixed(info.quantityPrecision), undefined, { positionSide: side });
-                        let subPrice = subOrder.average || subOrder.price || parseFloat(subOrder.info?.avgPrice) || currentPrice;
-                        filledQty += currentTryQty;
-                        filledCost += currentTryQty * subPrice;
-                        remainingQty = Math.floor((remainingQty - currentTryQty) / info.stepSize) * info.stepSize;
-                        remainingQty = Number(remainingQty.toFixed(info.quantityPrecision));
+                        let subOrder = await botInst.exchange.createOrder(symbol, 'MARKET', side === 'SHORT' ? 'SELL' : 'BUY', currentSubQty.toFixed(info.quantityPrecision), undefined, { positionSide: side });
+                        let filledP = subOrder.average || subOrder.price || parseFloat(subOrder.info?.avgPrice) || currentPrice;
+                        totalFilledQty += currentSubQty;
+                        totalFilledCost += (currentSubQty * filledP);
                         await new Promise(r => setTimeout(r, 200));
-                    } catch (chunkErr) {
-                        const cMsg = chunkErr?.response?.data?.msg || chunkErr?.message || String(chunkErr);
-                        const cCode = chunkErr?.response?.data?.code || chunkErr?.code;
-                        if (cMsg.includes('2027') || cCode === -2027) {
-                            chunkQty = Math.floor((chunkQty / 2) / info.stepSize) * info.stepSize;
-                            chunkQty = Number(chunkQty.toFixed(info.quantityPrecision));
-                            if (chunkQty * currentPrice < actualMinNotional) {
-                                addBotLog(botInst, `⚠️ Không thể mở thêm ${formatCoinName(symbol)} ${side} do chạm giới hạn max margin (Lỗi 2027). Dừng mở tiếp.`, "warn");
-                                break;
-                            }
+                    } catch (subErr) {
+                        const subErrMsg = subErr?.response?.data?.msg || subErr?.message || String(subErr);
+                        const subErrCode = subErr?.response?.data?.code || subErr?.code;
+                        if (subErrMsg.includes('2027') || subErrCode === -2027) {
+                            addBotLog(botInst, `⚠️ Đã chạm hạn mức tối đa cho phép mở cho ${formatCoinName(symbol)} ${side} (Đã khớp Qty: ${totalFilledQty}). Dừng chia nhỏ.`, "warn");
+                            break;
                         } else {
+                            addBotLog(botInst, `⚠️ Lỗi chia nhỏ lệnh ${i+1}/${numSplits} cho ${formatCoinName(symbol)} ${side}: ${subErrMsg}`, "warn");
                             break;
                         }
                     }
                 }
 
-                if (filledQty > 0) {
-                    qty = filledQty;
-                    actualFilledPrice = filledCost / filledQty;
-                    order = { average: actualFilledPrice, filled: filledQty };
-                } else {
-                    addBotLog(botInst, `❌ Không thể mở lệnh ${formatCoinName(symbol)} ${side} do chạm giới hạn vị thế sàn (Lỗi 2027). Bỏ qua lệnh!`, "error");
+                if (totalFilledQty <= 0) {
+                    addBotLog(botInst, `❌ Không thể mở lệnh ${formatCoinName(symbol)} ${side} do lỗi 2027 không khớp được sub-order nào.`, "error");
                     return;
                 }
-            } else if (errMsg.includes('4411') || errCode === -4411 || errMsg.toLowerCase().includes('tradfi')) {
-                addBotLog(botInst, `❌ Tài khoản chưa đăng ký/ký thỏa thuận TradFi (Lỗi 4411) cho ${formatCoinName(symbol)} ${side}`, "error");
-                return;
+
+                order = {
+                    average: totalFilledCost / totalFilledQty,
+                    price: totalFilledCost / totalFilledQty,
+                    info: { avgPrice: (totalFilledCost / totalFilledQty).toString() }
+                };
             } else {
                 throw orderErr;
             }
         }
         
-        if (order) {
+        if (order && totalFilledQty > 0) {
             positionRiskCache.lastUpdate = 0;
 
+            let actualQty = totalFilledQty;
+            let actualFilledPrice = currentPrice;
             if (order.average || order.price || parseFloat(order.info?.avgPrice)) {
                 actualFilledPrice = order.average || order.price || parseFloat(order.info?.avgPrice);
             }
 
-            let cumulativeQty = qty;
-            let cumulativeCost = qty * actualFilledPrice;
+            let cumulativeQty = actualQty;
+            let cumulativeCost = actualQty * actualFilledPrice;
             let newAvgEntry = actualFilledPrice;
-            let actualMarginUsed = (qty * actualFilledPrice) / info.maxLeverage;
+            let actualMarginUsed = (actualQty * actualFilledPrice) / info.maxLeverage;
             let totalMargin = actualMarginUsed;
             let dcaHistory = [];
             let dcaAmCount = 0;
@@ -1291,8 +1307,8 @@ async function openPosition(botInst, symbol, dcaData = null, forcedSide = 'LONG'
             let lastDcaType = 'DUONG';
 
             if (isDCA) {
-                cumulativeQty = dcaData.cumulativeQty + qty;
-                cumulativeCost = dcaData.cumulativeCost + (qty * actualFilledPrice);
+                cumulativeQty = dcaData.cumulativeQty + actualQty;
+                cumulativeCost = dcaData.cumulativeCost + (actualQty * actualFilledPrice);
                 newAvgEntry = cumulativeCost / cumulativeQty;
                 totalMargin = (dcaData.currentMargin || dcaData.firstMargin || 0) + actualMarginUsed;
                 dcaHistory = [...dcaData.dcaHistory, { price: actualFilledPrice, margin: actualMarginUsed, type: dcaData.dcaType }];
@@ -1358,16 +1374,14 @@ async function openPosition(botInst, symbol, dcaData = null, forcedSide = 'LONG'
         const errMsgDetails = e?.response?.data?.msg || e?.stack || e?.message || String(e);
         const errCode = e?.response?.data?.code || e?.code;
 
+        let displayMsg = errMsgDetails;
         if (errMsgDetails.includes('4411') || errCode === -4411 || errMsgDetails.toLowerCase().includes('tradfi')) {
-            if (!sharedState.errorSpamGuard[errKey] || now - sharedState.errorSpamGuard[errKey] > 3600000) { 
-                sharedState.errorSpamGuard[errKey] = now;
-                addBotLog(botInst, `❌ Tài khoản chưa đăng ký/ký thỏa thuận TradFi (Lỗi 4411) cho ${formatCoinName(symbol)} ${side}`, "error"); 
-            }
-        } else {
-            if (!sharedState.errorSpamGuard[errKey] || now - sharedState.errorSpamGuard[errKey] > 3600000) { 
-                sharedState.errorSpamGuard[errKey] = now;
-                addBotLog(botInst, `❌ [LỖI MỞ LỆNH ${side}] ${formatCoinName(symbol)}: ${errMsgDetails}`, "error"); 
-            }
+            displayMsg = "Tài khoản chưa đăng ký/ký thỏa thuận TradFi trên Binance (Mã lỗi 4411)";
+        }
+
+        if (!sharedState.errorSpamGuard[errKey] || now - sharedState.errorSpamGuard[errKey] > 3600000) { 
+            sharedState.errorSpamGuard[errKey] = now;
+            addBotLog(botInst, `❌ [LỖI MỞ LỆNH ${side}] ${formatCoinName(symbol)}: ${displayMsg}`, "error"); 
         }
         checkAndAddBlacklist(symbol);
     } finally { 
