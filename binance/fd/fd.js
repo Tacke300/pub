@@ -22,19 +22,18 @@ let userConfig = {
     secretKey: DEFAULT_SECRET_KEY,
     amountMode: 'percent', 
     amountValue: 25,       
-    tpFixedPercent: 1,     // TP Cứng (% giá)
-    enableTrailing: false, // Bật / Tắt Trailing TP
-    tpTrailingPercent: 1,  // Trailing TP (% giá entry)
+    tpFixedPercent: 1,     
+    enableTrailing: false, 
+    tpTrailingPercent: 1,  
     slPercent: 2,
     longOffsetMs: 1500, 
     shortOffsetMs: 0,
     fundingThreshold: 0.3,
-    tradeMode: 'both',     // 'both', 'main', 'always'
+    tradeMode: 'both',     
     sortMode: 'pnl',
-    holdMinutes: 15        // Thời gian giữ lệnh chế độ Always (phút)
+    holdMinutes: 15        
 };
 
-// Quản lý Blacklist âm thầm (Không log)
 let blacklistMap = {}; 
 
 function isBlacklisted(symbol) {
@@ -53,7 +52,6 @@ function unlockBlacklistWith15MinDelay(symbol) {
     blacklistMap[symbol] = Date.now() + 15 * 60 * 1000; 
 }
 
-// Quản lý data.json âm thầm (Không log)
 function saveDataPositionsToFile() {
     try {
         const dataObj = {
@@ -407,7 +405,6 @@ async function ensureCrossMargin(symbol) {
             marginType: 'CROSSED'
         });
     } catch (e) {
-        // Bỏ qua lỗi nếu tài khoản/symbol đã ở chế độ CROSSED (-4046)
     }
 }
 
@@ -492,13 +489,11 @@ function fetchAndLogRealizedPnL(symbol, positionSide, isTest = false) {
     }, 5000); 
 }
 
-// Sửa lỗi Margin < 5$ (luôn làm tròn >= 5.5$ Notional = Margin * Leverage)
 function calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage) {
     let exchangeMinNotional = symbolInfo ? (symbolInfo.minNotional || 5.0) : 5.0;
     let minQty = symbolInfo ? (symbolInfo.minQty || 0) : 0;
     let minQtyNotional = minQty * currentPrice;
 
-    // Ép làm tròn cho lệnh phải mở ít nhất 5.5$ Notional (Margin x Lev)
     let requiredNotional = Math.max(5.5, exchangeMinNotional, minQtyNotional);
     let targetNotional = initialMargin * leverage;
 
@@ -523,7 +518,6 @@ function calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverag
     return parseFloat(quantity.toFixed(precision));
 }
 
-// Đặt lệnh Market kèm tự động hỏi lại min volume nếu xảy ra lỗi
 async function executeMarketOrderWithMinVolCheck(symbol, side, positionSide, quantity, currentPrice) {
     const orderSide = side === 'LONG' ? 'BUY' : 'SELL';
     try {
@@ -531,7 +525,6 @@ async function executeMarketOrderWithMinVolCheck(symbol, side, positionSide, qua
             symbol: symbol, side: orderSide, positionSide: positionSide, type: 'MARKET', quantity: quantity
         });
     } catch (error) {
-        // Hỏi lại sàn min vol mà không log lỗi vội
         try {
             const exInfo = await callPublicAPI('/fapi/v1/exchangeInfo');
             const sInfo = exInfo.symbols.find(s => s.symbol === symbol);
@@ -623,7 +616,6 @@ async function fetchFundingDataFromBinance(forceRefresh = false) {
 function getFilteredCandidates(allFunding, reqThreshold = null, targetFundingTime = null) {
     let valid = [...allFunding];
 
-    // Bỏ qua các coin đang ở trong Blacklist
     valid = valid.filter(item => !isBlacklisted(item.symbol));
 
     if (targetFundingTime !== null) {
@@ -815,7 +807,6 @@ async function openBufferPosition(symbol, leverage, balance, side, isTest = fals
 
         log('TRADE', 'BUFFER', `🚀 Mở vị thế Buffer | Coin: ${symbol} | Hướng: ${side} | Qty: ${formatNumber(quantity)} | Đòn bẩy: ${leverage}x | Entry: ${formatPrice(currentPrice)}`);
 
-        // Thêm vào Blacklist
         addToBlacklist(symbol);
 
         const bufPos = { 
@@ -938,7 +929,6 @@ async function openMainPosition(symbol, quantity, nextFundingTime, side, isTest 
         const margin = (quantity * realEntryPrice) / (lev || 1);
         log('TRADE', 'MAIN', `🚀 Mở vị thế Main | Coin: ${symbol} | Hướng: ${side} | Qty: ${formatNumber(quantity)} | Đòn bẩy: ${lev}x | Margin: ${margin.toFixed(2)} USDT | Entry: ${formatPrice(realEntryPrice)}`);
 
-        // Thêm vào Blacklist
         addToBlacklist(symbol);
 
         const mainPos = { 
@@ -973,18 +963,20 @@ async function manageMainPositions() {
             const { symbol, side, entryPrice, nextFundingTime, openTime, isTest } = pos;
             const isLong = side === 'LONG';
 
-            // 1. Kiểm tra giới hạn thời gian giữ lệnh đối với chế độ ALWAYS
             if (userConfig.tradeMode === 'always') {
                 const elapsedMins = (Date.now() - openTime) / 60000;
                 const maxHoldMins = userConfig.holdMinutes || 15;
                 if (elapsedMins >= maxHoldMins) {
-                    log('INFO', 'MAIN', `⏳ [ALWAYS MODE] Đã giữ lệnh ${elapsedMins.toFixed(1)}m >= ${maxHoldMins}m. Tự động đóng vị thế!`);
+                    log('INFO', 'MAIN', `⏳ [ALWAYS MODE] Đã giữ lệnh ${elapsedMins.toFixed(1)}m >= ${maxHoldMins}m. Tự động đóng vị thế ngay lập tức!`);
                     await closeMainInternal(pos, `Hết thời gian Always (${maxHoldMins}m)`, isTest);
                     continue;
                 }
+            } else if (nextFundingTime && currentServerTime >= nextFundingTime) {
+                log('INFO', 'MAIN', `⏳ Hết giờ Funding cho ${symbol}. Tự động đóng vị thế ngay lập tức!`);
+                await closeMainInternal(pos, 'Hết giờ Funding', isTest);
+                continue;
             }
 
-            // 2. Kiểm tra đóng lệnh khi chạy TEST giờ Funding
             if (nextFundingTime && isTest) {
                 const timeRemaining = nextFundingTime - currentServerTime;
                 if (timeRemaining <= 1500 && timeRemaining > 0) {
@@ -1169,7 +1161,6 @@ async function restoreActivePositionsOnStartup() {
     loadStateFromFile();
     const dataSaved = loadDataPositionsFromFile();
     
-    // Ưu tiên dữ liệu từ data.json
     let candidateMains = dataSaved.mainPositions.length > 0 ? dataSaved.mainPositions : currentMainPositions;
     let candidateBuffers = dataSaved.bufferPositions.length > 0 ? dataSaved.bufferPositions : currentBufferPositions;
 
@@ -1185,7 +1176,6 @@ async function restoreActivePositionsOnStartup() {
             const pos = positions.find(p => p.symbol === mainPos.symbol && (p.positionSide === mainPos.side || p.positionSide === 'BOTH'));
             if (pos) {
                 const actualAmt = Math.abs(parseFloat(pos.positionAmt));
-                // Đối chiếu chính xác vị thế và số lượng với data.json
                 if (actualAmt > 0 && (Math.abs(actualAmt - parseFloat(mainPos.quantity)) < 0.001 || Math.abs(actualAmt - parseFloat(mainPos.quantity)) / actualAmt < 0.02)) {
                     log('SUCCESS', 'SYNC', `✓ Khôi phục quản lý MAIN ${mainPos.side} ${mainPos.symbol} (Entry: ${mainPos.entryPrice})`);
                     validMains.push(mainPos);
@@ -1266,10 +1256,12 @@ async function getDashboardDataCached() {
             const lev = parseInt(p.leverage);
             const margin = (posAmtAbs * entryPrice) / lev;
             const pnl = parseFloat(p.unRealizedProfit);
-            const roi = margin > 0 ? (pnl / margin) * 100 : 0;
+            
             const isLong = p.positionSide === 'LONG' || (p.positionSide === 'BOTH' && posAmt > 0);
             const sideStr = isLong ? 'LONG' : 'SHORT';
             
+            const roi = entryPrice > 0 ? (isLong ? ((markPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - markPrice) / entryPrice) * 100) : 0;
+
             const isMatchMain = currentMainPositions.find(m => 
                 m.symbol === p.symbol && 
                 (m.side === p.positionSide || p.positionSide === 'BOTH')
@@ -1280,7 +1272,6 @@ async function getDashboardDataCached() {
                 (b.side === p.positionSide || p.positionSide === 'BOTH')
             );
 
-            // BỎ QUA những coin không phải do bot mở
             if (!isMatchMain && !isMatchBuffer) {
                 continue;
             }
@@ -1307,26 +1298,31 @@ async function getDashboardDataCached() {
             const tpTrailingPct = userConfig.tpTrailingPercent || 1;
             const holdMins = userConfig.holdMinutes || 15;
 
-            // 1. Tính toán Stop Loss (SL)
             const slPrice = isLong ? 
                 entryPrice - (entryPrice * (slPct / 100)) : 
                 entryPrice + (entryPrice * (slPct / 100));
             const slPnlRoi = -slPct * lev;
             const slPnlAmount = margin * (slPnlRoi / 100);
 
-            // 2. Tính toán Take Profit Cứng (TP Cứng)
             const tpFixedPrice = isLong ? 
                 entryPrice + (entryPrice * (tpFixedPct / 100)) : 
                 entryPrice - (entryPrice * (tpFixedPct / 100));
             const tpFixedPnlRoi = tpFixedPct * lev;
             const tpFixedPnlAmount = margin * (tpFixedPnlRoi / 100);
 
-            // 3. Tính toán Trailing TP
-            let tpTrailingPrice = tpFixedPrice;
-            let tpTrailingPnlRoi = tpFixedPnlRoi;
-            let tpTrailingPnlAmount = tpFixedPnlAmount;
+            const maxGainPct = isLong ? 
+                ((deepest - entryPrice) / entryPrice) * 100 : 
+                ((entryPrice - deepest) / entryPrice) * 100;
 
-            if (enableTrailing) {
+            const isTrailingActive = maxGainPct >= tpFixedPct;
+
+            let tpTrailingPrice = isLong ? 
+                entryPrice * (1 + (tpFixedPct + tpTrailingPct) / 100) : 
+                entryPrice * (1 - (tpFixedPct + tpTrailingPct) / 100);
+            let tpTrailingPnlRoi = (tpFixedPct + tpTrailingPct) * lev;
+            let tpTrailingPnlAmount = margin * ((tpFixedPct + tpTrailingPct) / 100);
+
+            if (enableTrailing && isTrailingActive) {
                 if (isLong) {
                     const trailedSL = deepest - (entryPrice * (tpTrailingPct / 100));
                     tpTrailingPrice = Math.max(tpFixedPrice, trailedSL);
@@ -1336,10 +1332,10 @@ async function getDashboardDataCached() {
                     tpTrailingPrice = Math.min(tpFixedPrice, trailedSL);
                     tpTrailingPnlRoi = ((entryPrice - tpTrailingPrice) / entryPrice) * 100 * lev;
                 }
-                tpTrailingPnlAmount = margin * (tpTrailingPnlRoi / 100);
+                const pnlDistPct = isLong ? ((tpTrailingPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - tpTrailingPrice) / entryPrice) * 100;
+                tpTrailingPnlAmount = margin * (pnlDistPct / 100) * lev;
             }
 
-            // 4. Tính toán đếm ngược đóng lệnh
             let remainingMs = 0;
             if (userConfig.tradeMode === 'always') {
                 const targetCloseTime = openTime + (holdMins * 60000);
@@ -1368,6 +1364,7 @@ async function getDashboardDataCached() {
                 tpFixedPnlRoi: tpFixedPnlRoi,
                 tpFixedPnlAmount: tpFixedPnlAmount,
                 enableTrailing: enableTrailing,
+                isTrailingActive: isTrailingActive,
                 tpTrailingPct: tpTrailingPct,
                 extremePrice: deepest,
                 tpTrailingPrice: tpTrailingPrice,
@@ -1413,6 +1410,7 @@ async function startBotLogicInternal(query) {
     if (query.holdMinutes !== undefined && query.holdMinutes !== '') { userConfig.holdMinutes = parseFloat(query.holdMinutes); isUpdated = true; }
 
     if (isUpdated) { saveConfigToFile(); }
+    cachedDashboardData = null;
     try {
         await syncServerTime();
         await updateAllLeverageCache();
@@ -1428,6 +1426,7 @@ async function startBotLogicInternal(query) {
 
 function stopBotLogicInternal() {
     botRunning = false;
+    cachedDashboardData = null;
     clearTimeout(schedulerTimeout);
     clearTimeout(scheduledBufferTimeout);
     clearTimeout(scheduledMainTimeout);
@@ -1468,7 +1467,14 @@ app.get('/api/save_config', (req, res) => {
         if (query.holdMinutes !== undefined && query.holdMinutes !== '' && !isNaN(parseFloat(query.holdMinutes))) userConfig.holdMinutes = parseFloat(query.holdMinutes);
 
         saveConfigToFile();
-        log('SUCCESS', 'SYSTEM', '✓ Cập nhật & lưu cấu hình thành công.');
+        cachedDashboardData = null;
+        
+        if (botRunning) {
+            clearTimeout(schedulerTimeout);
+            armT2MinuteScheduler();
+        }
+
+        log('SUCCESS', 'SYSTEM', '✓ Cập nhật & áp dụng cấu hình mới thành công.');
         res.send('✅ Đã lưu cấu hình thành công!');
     } catch (e) {
         res.status(500).send('Lỗi lưu cấu hình: ' + getErrorMessage(e));
@@ -1508,6 +1514,7 @@ app.get('/api/force_close', async (req, res) => {
             await aggressiveCleanup(symbol);
         }
         
+        cachedDashboardData = null;
         res.send(`✅ Đã đóng vị thế ${symbol}`);
     } catch (e) {
         log('ERROR', 'POSITION', `✖ Lỗi đóng vị thế khẩn cấp ${req.query.symbol}: ${getErrorMessage(e)}`);
@@ -1551,6 +1558,7 @@ app.get('/api/test_fast', async (req, res) => {
 
         openMainPosition(best.symbol, quantity, best.nextFundingTime, mainSide, true, best.estPnl).catch(e => {});
 
+        cachedDashboardData = null;
         res.send(`✅ Test Nhanh thành công: Đã mở vị thế MAIN ${mainSide} cho ${best.symbol}`);
     } catch (e) {
         res.send('❌ Lỗi Test Nhanh: ' + getErrorMessage(e));
