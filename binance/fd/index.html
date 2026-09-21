@@ -32,8 +32,8 @@
     }
     .stat-label { color: #848E9C; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 5px; font-weight: 600; }
     .stat-value { color: #EAECEF; font-size: 1.2rem; font-weight: 700; }
-    .text-green { color: #00C087 !important; }
-    .text-red { color: #F03D4D !important; }
+    .text-green { color: #00C087; }
+    .text-red { color: #F03D4D; }
 
     .positions-wrapper {
       width: 100%; max-width: 900px; margin-bottom: 15px; display: flex; flex-direction: column; gap: 10px;
@@ -50,9 +50,9 @@
     .badge-long { background-color: rgba(0, 192, 135, 0.15); color: #00C087; }
     .badge-short { background-color: rgba(240, 61, 77, 0.15); color: #F03D4D; }
     .badge-maxlev { background-color: rgba(252, 213, 53, 0.15); color: #FCD535; padding: 3px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
-    .pos-pnl-group { text-align: right; color: #EAECEF; }
-    .pos-pnl-val { font-size: 1.1rem; font-weight: 700; color: #EAECEF; }
-    .pos-roi-val { font-size: 0.8rem; font-weight: 600; margin-top: 2px; color: #EAECEF; }
+    .pos-pnl-group { text-align: right; }
+    .pos-pnl-val { font-size: 1.1rem; font-weight: 700; }
+    .pos-roi-val { font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 
     .pos-grid {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 15px; font-size: 0.82rem;
@@ -330,7 +330,7 @@
         setInterval(fetchLogs, 1500);
         setInterval(fetchStatus, 2500);
         setInterval(fetchFundingTable, 5000);
-        setInterval(fetchDashboardStats, 1200);
+        setInterval(fetchDashboardStats, 3000);
         setInterval(updatePositionCountdowns, 1000);
     };
 
@@ -374,15 +374,15 @@
                 el.textContent = '--';
                 return;
             }
-            const remainingSecs = Math.floor((targetTime - Date.now()) / 1000);
+            const remainingSecs = Math.max(0, Math.floor((targetTime - Date.now()) / 1000));
             if (remainingSecs <= 0) {
                 el.textContent = 'Hết giờ (Đang đóng)';
-                el.className = 'pos-item-value text-red pos-timer';
+                el.style.color = '#F03D4D';
             } else {
                 const mins = Math.floor(remainingSecs / 60);
                 const secs = remainingSecs % 60;
                 el.textContent = `${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s còn lại`;
-                el.className = 'pos-item-value text-green pos-timer';
+                el.style.color = '#00C087';
             }
         });
     }
@@ -514,13 +514,11 @@
         const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
         await fetch(url);
         fetchStatus();
-        fetchDashboardStats();
     }
 
     async function stopBot() {
         await fetch('/api/stop');
         fetchStatus();
-        fetchDashboardStats();
     }
 
     async function saveConfig() {
@@ -541,7 +539,6 @@
         const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
         await fetch(url);
         fetchStatus();
-        fetchDashboardStats();
     }
 
     async function testFast() {
@@ -549,7 +546,6 @@
         const res = await fetch('/api/test_fast');
         const msg = await res.text();
         alert(msg);
-        fetchDashboardStats();
     }
 
     async function forceClosePosition(symbol, side) {
@@ -597,6 +593,10 @@
                     const sideClass = p.side === 'LONG' ? 'badge-long' : 'badge-short';
                     const pnlSign = isGreen ? '+' : '';
                     
+                    const pctFromEntryVal = p.pctFromEntry || 0;
+                    const pctSign = pctFromEntryVal >= 0 ? '+' : '';
+                    const pctClass = pctFromEntryVal >= 0 ? 'text-green' : 'text-red';
+
                     const slPnlAmount = p.slPnlAmount || 0;
                     const slPnlRoi = p.slPnlRoi || 0;
                     
@@ -608,6 +608,9 @@
 
                     const targetCloseTime = Date.now() + (p.remainingMs || 0);
 
+                    const trailingNumColorClass = p.isReached ? 'text-green' : '';
+                    const trailingNumStyle = p.isReached ? '' : 'color: #EAECEF;';
+
                     cardsHtml += `
                         <div class="position-card" data-key="${key}">
                             <div class="pos-header">
@@ -617,8 +620,8 @@
                                     <div class="badge-maxlev">${p.leverage}x</div>
                                 </div>
                                 <div class="pos-pnl-group">
-                                    <div class="pos-pnl-val"><span class="${pnlClass}">${pnlSign}${p.pnl.toFixed(4)}</span> USDT</div>
-                                    <div class="pos-roi-val"><span class="${pnlClass}">${p.roi >= 0 ? '+' : ''}${p.roi.toFixed(2)}%</span> cách Entry</div>
+                                    <div class="pos-pnl-val ${pnlClass}">${pnlSign}${p.pnl.toFixed(4)} USDT</div>
+                                    <div class="pos-roi-val ${pctClass}">${pctSign}${pctFromEntryVal.toFixed(2)}% cách Entry</div>
                                 </div>
                             </div>
                             <div class="pos-grid">
@@ -641,17 +644,17 @@
 
                                 <div class="pos-item">
                                     <span class="pos-item-label">Cắt Lỗ (SL)</span>
-                                    <span class="pos-item-value">Giá <span class="text-red">${formatDynamicPrice(p.slPrice)}</span> | PnL: <span class="text-red">${slPnlAmount.toFixed(4)} USDT (${slPnlRoi.toFixed(2)}%)</span></span>
+                                    <span class="pos-item-value" style="color: #EAECEF;">Giá <span class="text-red">${formatDynamicPrice(p.slPrice)}</span> | PnL: <span class="text-red">${slPnlAmount.toFixed(4)} USDT</span> (<span class="text-red">${slPnlRoi.toFixed(2)}%</span>)</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Chốt Lãi Cứng (TP Cứng)</span>
-                                    <span class="pos-item-value">Giá <span class="text-green">${formatDynamicPrice(p.tpFixedPrice)}</span> | PnL: <span class="text-green">+${tpFixedPnlAmount.toFixed(4)} USDT (+${tpFixedPnlRoi.toFixed(2)}%)</span></span>
+                                    <span class="pos-item-label">Chốt Lời Cứng (TP Cứng)</span>
+                                    <span class="pos-item-value" style="color: #EAECEF;">Giá <span class="text-green">${formatDynamicPrice(p.tpFixedPrice)}</span> | PnL: <span class="text-green">+${tpFixedPnlAmount.toFixed(4)} USDT</span> (<span class="text-green">+${tpFixedPnlRoi.toFixed(2)}%</span>)</span>
                                 </div>
 
                                 ${p.enableTrailing ? `
                                 <div class="pos-item" style="grid-column: 1 / -1;">
                                     <span class="pos-item-label">Trailing TP (Tụt ${p.tpTrailingPct}\% từ Đỉnh/Đáy ${formatDynamicPrice(p.extremePrice)})</span>
-                                    <span class="pos-item-value">Giá Chốt: <span class="${p.isTrailingActive ? 'text-green' : ''}">${formatDynamicPrice(p.tpTrailingPrice)}</span> | PnL Trailing: <span class="${p.isTrailingActive ? 'text-green' : ''}">${tpTrailingPnlAmount >= 0 ? '+' : ''}${tpTrailingPnlAmount.toFixed(4)} USDT (${tpTrailingPnlRoi >= 0 ? '+' : ''}${tpTrailingPnlRoi.toFixed(2)}%)</span></span>
+                                    <span class="pos-item-value" style="color: #EAECEF;">Giá Chốt: <span class="${trailingNumColorClass}" style="${trailingNumStyle}">${formatDynamicPrice(p.tpTrailingPrice)}</span> | PnL Trailing: <span class="${trailingNumColorClass}" style="${trailingNumStyle}">${tpTrailingPnlAmount >= 0 ? '+' : ''}${tpTrailingPnlAmount.toFixed(4)} USDT</span> (<span class="${trailingNumColorClass}" style="${trailingNumStyle}">${tpTrailingPnlRoi >= 0 ? '+' : ''}${tpTrailingPnlRoi.toFixed(2)}%</span>)</span>
                                 </div>
                                 ` : ''}
                             </div>
