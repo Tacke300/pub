@@ -20,21 +20,21 @@ const DEFAULT_SECRET_KEY = 'oU6pZFHgEvbpD9NmFXp5ZVnYFMQ7EIkBiz88aTzvmC3SpT9nEf4f
 let userConfig = {
     apiKey: DEFAULT_API_KEY,
     secretKey: DEFAULT_SECRET_KEY,
-    amountMode: 'percent', 
-    amountValue: 25,       
-    tpFixedPercent: 1,     
-    enableTrailing: false, 
-    tpTrailingPercent: 1,  
+    amountMode: 'percent',
+    amountValue: 25,
+    tpFixedPercent: 1,
+    enableTrailing: false,
+    tpTrailingPercent: 1,
     slPercent: 2,
-    longOffsetMs: 1500, 
+    longOffsetMs: 1500,
     shortOffsetMs: 0,
     fundingThreshold: 0.3,
-    tradeMode: 'both',     
+    tradeMode: 'both',
     sortMode: 'pnl',
-    holdMinutes: 15        
+    holdMinutes: 15
 };
 
-let blacklistMap = {}; 
+let blacklistMap = {};
 
 function isBlacklisted(symbol) {
     const unlockTime = blacklistMap[symbol];
@@ -45,11 +45,11 @@ function isBlacklisted(symbol) {
 }
 
 function addToBlacklist(symbol) {
-    blacklistMap[symbol] = Date.now() + 999999999999; 
+    blacklistMap[symbol] = Date.now() + 999999999999;
 }
 
 function unlockBlacklistWith15MinDelay(symbol) {
-    blacklistMap[symbol] = Date.now() + 15 * 60 * 1000; 
+    blacklistMap[symbol] = Date.now() + 15 * 60 * 1000;
 }
 
 function saveDataPositionsToFile() {
@@ -98,48 +98,44 @@ function loadConfigFromFile() {
             const savedConfig = JSON.parse(rawData);
             userConfig = { ...userConfig, ...savedConfig };
         }
-    } catch (error) {
-        log('WARN', 'SYSTEM', `⚠️ Không thể đọc file cấu hình: ${getErrorMessage(error)}`);
-    }
+    } catch (error) {}
 }
 
 function saveConfigToFile() {
     try {
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(userConfig, null, 2), 'utf8');
-    } catch (error) {
-        log('ERROR', 'SYSTEM', `✖ Lỗi lưu file cấu hình: ${getErrorMessage(error)}`);
-    }
+    } catch (error) {}
 }
 
 const BASE_HOST = 'fapi.binance.com';
 
-let serverTimeOffset = 0; 
+let serverTimeOffset = 0;
 let exchangeInfoCache = null;
 let leverageCache = {};
 let botRunning = false;
-let botStartTime = null; 
+let botStartTime = null;
 
-let currentMainPositions = []; 
-let currentBufferPositions = []; 
+let currentMainPositions = [];
+let currentBufferPositions = [];
 
-let mainCheckInterval = null; 
+let mainCheckInterval = null;
 let bufferCheckInterval = null;
-let schedulerTimeout = null; 
-let scheduledBufferTimeout = null; 
+let schedulerTimeout = null;
+let scheduledBufferTimeout = null;
 let scheduledMainTimeout = null;
 let antiLiquidationInterval = null;
 
 let isOpeningPosition = false;
 let lastOrderOpenTime = 0;
 
-let consecutiveApiErrors = 0; 
-const MAX_CONSECUTIVE_API_ERRORS = 10; 
+let consecutiveApiErrors = 0;
+const MAX_CONSECUTIVE_API_ERRORS = 10;
 const memoryLogs = [];
-const MAX_LOG_SIZE = 1000; 
-const logCounts = {}; 
-const LOG_COOLDOWN_MS = 60000; 
+const MAX_LOG_SIZE = 1000;
+const logCounts = {};
+const LOG_COOLDOWN_MS = 60000;
 
-const WEB_SERVER_PORT = 9999; 
+const WEB_SERVER_PORT = 9999;
 
 let globalStats = {
     totalSessions: 0,
@@ -148,11 +144,11 @@ let globalStats = {
 
 let cachedFundingRates = [];
 let lastFundingFetchTime = 0;
-const FUNDING_CACHE_TTL = 30000; 
+const FUNDING_CACHE_TTL = 30000;
 
 let cachedDashboardData = null;
 let lastDashboardFetchTime = 0;
-const DASHBOARD_CACHE_TTL = 3000; 
+const DASHBOARD_CACHE_TTL = 1500;
 
 function formatTime(date = new Date()) {
     const utc7 = new Date(date.getTime() + (7 * 60 * 60 * 1000));
@@ -196,14 +192,14 @@ function log(level, moduleName, message) {
     const timestamp = formatTime();
     const formattedLog = `[${timestamp}] [${level}] [${moduleName}] ${message}`;
 
-    const plainTextMsg = formattedLog.replace(/<[^>]*>?/gm, ''); 
+    const plainTextMsg = formattedLog.replace(/<[^>]*>?/gm, '');
     const messageHash = crypto.createHash('md5').update(plainTextMsg).digest('hex');
     const now = Date.now();
-    
+
     if (logCounts[messageHash]) {
         logCounts[messageHash].count++;
         if ((now - logCounts[messageHash].lastLoggedTime) < LOG_COOLDOWN_MS) {
-            return; 
+            return;
         } else {
             logCounts[messageHash] = { count: 1, lastLoggedTime: new Date(now) };
         }
@@ -211,9 +207,9 @@ function log(level, moduleName, message) {
         logCounts[messageHash] = { count: 1, lastLoggedTime: new Date(now) };
     }
 
-    console.log(plainTextMsg); 
+    console.log(plainTextMsg);
     memoryLogs.push(formattedLog);
-    if (memoryLogs.length > MAX_LOG_SIZE) memoryLogs.shift(); 
+    if (memoryLogs.length > MAX_LOG_SIZE) memoryLogs.shift();
 }
 
 function saveStateToFile() {
@@ -225,9 +221,7 @@ function saveStateToFile() {
             globalStats
         };
         fs.writeFileSync(STATE_FILE, JSON.stringify(stateData, null, 2), 'utf8');
-    } catch (e) {
-        log('ERROR', 'SYSTEM', `✖ Lỗi lưu vị thế state: ${getErrorMessage(e)}`);
-    }
+    } catch (e) {}
 }
 
 function loadStateFromFile() {
@@ -252,11 +246,8 @@ function loadStateFromFile() {
             }
 
             if (data.botRunning !== undefined) botRunning = data.botRunning;
-            if (data.globalStats) globalStats = data.globalStats;
         }
-    } catch (e) {
-        log('ERROR', 'SYSTEM', `✖ Lỗi đọc vị thế state: ${getErrorMessage(e)}`);
-    }
+    } catch (e) {}
 }
 
 class CriticalApiError extends Error {
@@ -318,9 +309,6 @@ async function callSignedAPI(fullEndpointPath, method = 'GET', params = {}) {
         return JSON.parse(rawData);
     } catch (error) {
         consecutiveApiErrors++;
-        if (consecutiveApiErrors >= MAX_CONSECUTIVE_API_ERRORS) {
-            log('ERROR', 'API', `⚠ Đã xảy ra ${consecutiveApiErrors} lỗi API liên tiếp.`);
-        }
         throw error;
     }
 }
@@ -343,8 +331,7 @@ async function syncServerTime() {
         const data = await callPublicAPI('/fapi/v1/time');
         serverTimeOffset = data.serverTime - Date.now();
     } catch (error) {
-        log('ERROR', 'SYNC', `✖ Lỗi đồng bộ thời gian Binance: ${getErrorMessage(error)}`);
-        throw error; 
+        throw error;
     }
 }
 
@@ -384,7 +371,7 @@ async function updateAllLeverageCache(force = false) {
             });
             saveLeverageToFile();
         }
-    } catch (error) { }
+    } catch (error) {}
 }
 
 function getLeverageFromCache(symbol) {
@@ -404,8 +391,7 @@ async function ensureCrossMargin(symbol) {
             symbol: symbol,
             marginType: 'CROSSED'
         });
-    } catch (e) {
-    }
+    } catch (e) {}
 }
 
 async function getExchangeInfo() {
@@ -414,7 +400,7 @@ async function getExchangeInfo() {
         const data = await callPublicAPI('/fapi/v1/exchangeInfo');
         exchangeInfoCache = {};
         data.symbols.forEach(s => {
-            if (s.status !== 'TRADING') return; 
+            if (s.status !== 'TRADING') return;
             exchangeInfoCache[s.symbol] = {
                 minQty: parseFloat(s.filters.find(f => f.filterType === 'LOT_SIZE')?.minQty || 0),
                 stepSize: parseFloat(s.filters.find(f => f.filterType === 'LOT_SIZE')?.stepSize || 0.001),
@@ -432,22 +418,8 @@ async function getCurrentPrice(symbol) {
     try {
         const data = await callPublicAPI('/fapi/v1/ticker/price', { symbol });
         return parseFloat(data.price);
-    } catch (error) { 
-        return null; 
-    }
-}
-
-async function checkExchangePositionExists(symbol) {
-    try {
-        const positions = await callSignedAPI('/fapi/v2/positionRisk', 'GET', { symbol });
-        for (const pos of positions) {
-            if (Math.abs(parseFloat(pos.positionAmt)) > 0) {
-                return true;
-            }
-        }
-        return false;
-    } catch (e) {
-        return false;
+    } catch (error) {
+        return null;
     }
 }
 
@@ -464,7 +436,7 @@ async function aggressiveCleanup(symbol) {
                 });
             }
         }
-    } catch (e) { }
+    } catch (e) {}
 }
 
 function fetchAndLogRealizedPnL(symbol, positionSide, isTest = false) {
@@ -485,8 +457,8 @@ function fetchAndLogRealizedPnL(symbol, positionSide, isTest = false) {
             }
             
             log('PNL', 'PNL', `💰 Kết quả giao dịch | Coin: ${symbol} | Position: ${positionSide} | PnL thực tế: ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} USDT ${isTest ? '(TEST)' : ''}`);
-        } catch (e) { }
-    }, 5000); 
+        } catch (e) {}
+    }, 5000);
 }
 
 function calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage) {
@@ -753,8 +725,8 @@ async function executeT2MinuteSingleScan(targetFundingTime) {
         const bufferSide = isNegative ? 'LONG' : 'SHORT';
         const mainSide = isNegative ? 'SHORT' : 'LONG';
 
-        const longOffsetMs = userConfig.longOffsetMs || 1500;
-        const shortOffsetMs = userConfig.shortOffsetMs || 0;
+        const longOffsetMs = userConfig.longOffsetMs !== undefined ? userConfig.longOffsetMs : 1500;
+        const shortOffsetMs = userConfig.shortOffsetMs !== undefined ? userConfig.shortOffsetMs : 0;
 
         const delayLong = targetFundingTime - longOffsetMs - nowServer;
         const delayShort = targetFundingTime - shortOffsetMs - nowServer;
@@ -960,6 +932,7 @@ async function manageMainPositions() {
 
         for (let i = currentMainPositions.length - 1; i >= 0; i--) {
             const pos = currentMainPositions[i];
+            if (!pos) continue;
             const { symbol, side, entryPrice, nextFundingTime, openTime, isTest } = pos;
             const isLong = side === 'LONG';
 
@@ -1006,7 +979,7 @@ async function manageMainPositions() {
                 saveStateToFile();
             }
 
-            const extremePrice = pos.extremePrice;
+            const extremePrice = pos.extremePrice || entryPrice;
             const tpFixedPct = userConfig.tpFixedPercent || 1;
             const enableTrailing = userConfig.enableTrailing || false;
             const tpTrailingPct = userConfig.tpTrailingPercent || 1;
@@ -1087,7 +1060,7 @@ async function closeMainInternal(mainPos, reason = 'Thủ công', isTest = false
 
         if (actualAmt > 0) {
             await callSignedAPI('/fapi/v1/order', 'POST', {
-                symbol: symbol, side: orderSide, positionSide: pos.positionSide, type: 'MARKET', quantity: formatQty(symbol, actualAmt)
+                symbol: symbol, side: orderSide, positionSide: pos ? pos.positionSide : side, type: 'MARKET', quantity: formatQty(symbol, actualAmt)
             });
             log('SUCCESS', 'MAIN', `🛑 Đóng vị thế Main | Coin: ${symbol} | Hướng: ${side} | Giá vào: ${formatPrice(entryPrice)} | Giá thoát: ${formatPrice(markPrice)} | Lý do: ${reason} | Thời gian giữ: ${duration}`);
             fetchAndLogRealizedPnL(symbol, side, isTest);
@@ -1260,7 +1233,7 @@ async function getDashboardDataCached() {
             const isLong = p.positionSide === 'LONG' || (p.positionSide === 'BOTH' && posAmt > 0);
             const sideStr = isLong ? 'LONG' : 'SHORT';
             
-            const roi = entryPrice > 0 ? (isLong ? ((markPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - markPrice) / entryPrice) * 100) : 0;
+            const pctFromEntry = entryPrice > 0 ? (isLong ? ((markPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - markPrice) / entryPrice) * 100) : 0;
 
             const isMatchMain = currentMainPositions.find(m => 
                 m.symbol === p.symbol && 
@@ -1310,30 +1283,36 @@ async function getDashboardDataCached() {
             const tpFixedPnlRoi = tpFixedPct * lev;
             const tpFixedPnlAmount = margin * (tpFixedPnlRoi / 100);
 
-            const maxGainPct = isLong ? 
-                ((deepest - entryPrice) / entryPrice) * 100 : 
-                ((entryPrice - deepest) / entryPrice) * 100;
+            let extremePrice = deepest || entryPrice;
+            let maxGainPct = isLong ? 
+                ((extremePrice - entryPrice) / entryPrice) * 100 : 
+                ((entryPrice - extremePrice) / entryPrice) * 100;
 
-            const isTrailingActive = maxGainPct >= tpFixedPct;
+            let isReached = maxGainPct >= tpFixedPct;
+            
+            let tpTrailingPrice = 0;
+            let tpTrailingPnlRoi = 0;
+            let tpTrailingPnlAmount = 0;
 
-            let tpTrailingPrice = isLong ? 
-                entryPrice * (1 + (tpFixedPct + tpTrailingPct) / 100) : 
-                entryPrice * (1 - (tpFixedPct + tpTrailingPct) / 100);
-            let tpTrailingPnlRoi = (tpFixedPct + tpTrailingPct) * lev;
-            let tpTrailingPnlAmount = margin * ((tpFixedPct + tpTrailingPct) / 100);
-
-            if (enableTrailing && isTrailingActive) {
-                if (isLong) {
-                    const trailedSL = deepest - (entryPrice * (tpTrailingPct / 100));
-                    tpTrailingPrice = Math.max(tpFixedPrice, trailedSL);
-                    tpTrailingPnlRoi = ((tpTrailingPrice - entryPrice) / entryPrice) * 100 * lev;
+            if (enableTrailing) {
+                if (!isReached) {
+                    tpTrailingPrice = isLong ? 
+                        entryPrice * (1 + (tpFixedPct + tpTrailingPct) / 100) : 
+                        entryPrice * (1 - (tpFixedPct + tpTrailingPct) / 100);
+                    tpTrailingPnlRoi = (tpFixedPct + tpTrailingPct) * lev;
+                    tpTrailingPnlAmount = margin * (tpTrailingPnlRoi / 100);
                 } else {
-                    const trailedSL = deepest + (entryPrice * (tpTrailingPct / 100));
-                    tpTrailingPrice = Math.min(tpFixedPrice, trailedSL);
-                    tpTrailingPnlRoi = ((entryPrice - tpTrailingPrice) / entryPrice) * 100 * lev;
+                    if (isLong) {
+                        const trailedSL = extremePrice - (entryPrice * (tpTrailingPct / 100));
+                        tpTrailingPrice = Math.max(tpFixedPrice, trailedSL);
+                        tpTrailingPnlRoi = ((tpTrailingPrice - entryPrice) / entryPrice) * 100 * lev;
+                    } else {
+                        const trailedSL = extremePrice + (entryPrice * (tpTrailingPct / 100));
+                        tpTrailingPrice = Math.min(tpFixedPrice, trailedSL);
+                        tpTrailingPnlRoi = ((entryPrice - tpTrailingPrice) / entryPrice) * 100 * lev;
+                    }
+                    tpTrailingPnlAmount = margin * (tpTrailingPnlRoi / 100);
                 }
-                const pnlDistPct = isLong ? ((tpTrailingPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - tpTrailingPrice) / entryPrice) * 100;
-                tpTrailingPnlAmount = margin * (pnlDistPct / 100) * lev;
             }
 
             let remainingMs = 0;
@@ -1351,7 +1330,7 @@ async function getDashboardDataCached() {
                 leverage: lev,
                 margin: margin,
                 pnl: pnl,
-                roi: roi,
+                pctFromEntry: pctFromEntry,
                 entryPrice: entryPrice,
                 markPrice: markPrice,
                 openTime: openTime,
@@ -1364,9 +1343,9 @@ async function getDashboardDataCached() {
                 tpFixedPnlRoi: tpFixedPnlRoi,
                 tpFixedPnlAmount: tpFixedPnlAmount,
                 enableTrailing: enableTrailing,
-                isTrailingActive: isTrailingActive,
+                isReached: isReached,
                 tpTrailingPct: tpTrailingPct,
-                extremePrice: deepest,
+                extremePrice: extremePrice,
                 tpTrailingPrice: tpTrailingPrice,
                 tpTrailingPnlRoi: tpTrailingPnlRoi,
                 tpTrailingPnlAmount: tpTrailingPnlAmount,
@@ -1390,24 +1369,29 @@ async function getDashboardDataCached() {
     }
 }
 
-async function startBotLogicInternal(query) {
-    if (botRunning) return 'Bot đã đang chạy.';
+function updateParamsFromQuery(query) {
     let isUpdated = false;
-    
-    if (query.apiKey && query.apiKey.trim() !== '') { userConfig.apiKey = query.apiKey.trim(); isUpdated = true; }
-    if (query.secretKey && query.secretKey.trim() !== '') { userConfig.secretKey = query.secretKey.trim(); isUpdated = true; }
+    if (query.apiKey !== undefined && query.apiKey.trim() !== '') { userConfig.apiKey = query.apiKey.trim(); isUpdated = true; }
+    if (query.secretKey !== undefined && query.secretKey.trim() !== '') { userConfig.secretKey = query.secretKey.trim(); isUpdated = true; }
     if (query.amountMode) { userConfig.amountMode = query.amountMode; isUpdated = true; }
-    if (query.amountValue !== undefined) { userConfig.amountValue = parseFloat(query.amountValue); isUpdated = true; }
-    if (query.tpFixed !== undefined) { userConfig.tpFixedPercent = parseFloat(query.tpFixed); isUpdated = true; } 
-    if (query.tp !== undefined && query.tpFixed === undefined) { userConfig.tpFixedPercent = parseFloat(query.tp); isUpdated = true; }
+    if (query.amountValue !== undefined && !isNaN(parseFloat(query.amountValue))) { userConfig.amountValue = parseFloat(query.amountValue); isUpdated = true; }
+    if (query.tpFixed !== undefined && !isNaN(parseFloat(query.tpFixed))) { userConfig.tpFixedPercent = parseFloat(query.tpFixed); isUpdated = true; } 
+    if (query.tp !== undefined && query.tpFixed === undefined && !isNaN(parseFloat(query.tp))) { userConfig.tpFixedPercent = parseFloat(query.tp); isUpdated = true; }
     if (query.enableTrailing !== undefined) { userConfig.enableTrailing = query.enableTrailing === 'true' || query.enableTrailing === true; isUpdated = true; }
-    if (query.tpTrailing !== undefined) { userConfig.tpTrailingPercent = parseFloat(query.tpTrailing); isUpdated = true; }
-    if (query.sl !== undefined) { userConfig.slPercent = parseFloat(query.sl); isUpdated = true; }
+    if (query.tpTrailing !== undefined && !isNaN(parseFloat(query.tpTrailing))) { userConfig.tpTrailingPercent = parseFloat(query.tpTrailing); isUpdated = true; }
+    if (query.sl !== undefined && !isNaN(parseFloat(query.sl))) { userConfig.slPercent = parseFloat(query.sl); isUpdated = true; }
+    if (query.longMs !== undefined && query.longMs !== '') { userConfig.longOffsetMs = parseInt(query.longMs); isUpdated = true; }
     if (query.shortMs !== undefined && query.shortMs !== '') { userConfig.shortOffsetMs = parseInt(query.shortMs); isUpdated = true; }
     if (query.threshold !== undefined && query.threshold !== '') { userConfig.fundingThreshold = parseFloat(query.threshold); isUpdated = true; }
     if (query.tradeMode) { userConfig.tradeMode = query.tradeMode; isUpdated = true; }
     if (query.sortMode) { userConfig.sortMode = query.sortMode; isUpdated = true; }
-    if (query.holdMinutes !== undefined && query.holdMinutes !== '') { userConfig.holdMinutes = parseFloat(query.holdMinutes); isUpdated = true; }
+    if (query.holdMinutes !== undefined && query.holdMinutes !== '' && !isNaN(parseFloat(query.holdMinutes))) { userConfig.holdMinutes = parseFloat(query.holdMinutes); isUpdated = true; }
+    return isUpdated;
+}
+
+async function startBotLogicInternal(query) {
+    if (botRunning) return 'Bot đã đang chạy.';
+    const isUpdated = updateParamsFromQuery(query);
 
     if (isUpdated) { saveConfigToFile(); }
     cachedDashboardData = null;
@@ -1440,32 +1424,22 @@ function stopBotLogicInternal() {
 loadConfigFromFile();
 loadStateFromFile();
 
+memoryLogs.length = 0;
+globalStats.totalSessions = 0;
+globalStats.totalPnl = 0;
+saveStateToFile();
+
 const app = express();
 app.use(express.static(__dirname));
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index (34).html')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 app.get('/api/start', async (req, res) => { res.send(await startBotLogicInternal(req.query)); });
 app.get('/api/stop', (req, res) => res.send(stopBotLogicInternal()));
 
 app.get('/api/save_config', (req, res) => {
     try {
-        const query = req.query;
-        if (query.apiKey !== undefined && query.apiKey.trim() !== '') userConfig.apiKey = query.apiKey.trim();
-        if (query.secretKey !== undefined && query.secretKey.trim() !== '') userConfig.secretKey = query.secretKey.trim();
-        if (query.amountMode) userConfig.amountMode = query.amountMode;
-        if (query.amountValue !== undefined && !isNaN(parseFloat(query.amountValue))) userConfig.amountValue = parseFloat(query.amountValue);
-        if (query.tpFixed !== undefined && !isNaN(parseFloat(query.tpFixed))) userConfig.tpFixedPercent = parseFloat(query.tpFixed);
-        if (query.tp !== undefined && query.tpFixed === undefined && !isNaN(parseFloat(query.tp))) userConfig.tpFixedPercent = parseFloat(query.tp);
-        if (query.enableTrailing !== undefined) userConfig.enableTrailing = query.enableTrailing === 'true' || query.enableTrailing === true;
-        if (query.tpTrailing !== undefined && !isNaN(parseFloat(query.tpTrailing))) userConfig.tpTrailingPercent = parseFloat(query.tpTrailing);
-        if (query.sl !== undefined && !isNaN(parseFloat(query.sl))) userConfig.slPercent = parseFloat(query.sl);
-        if (query.shortMs !== undefined && query.shortMs !== '') userConfig.shortOffsetMs = parseInt(query.shortMs);
-        if (query.threshold !== undefined && query.threshold !== '') userConfig.fundingThreshold = parseFloat(query.threshold);
-        if (query.tradeMode) userConfig.tradeMode = query.tradeMode;
-        if (query.sortMode) userConfig.sortMode = query.sortMode;
-        if (query.holdMinutes !== undefined && query.holdMinutes !== '' && !isNaN(parseFloat(query.holdMinutes))) userConfig.holdMinutes = parseFloat(query.holdMinutes);
-
+        updateParamsFromQuery(req.query);
         saveConfigToFile();
         cachedDashboardData = null;
         
