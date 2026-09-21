@@ -55,7 +55,7 @@
     .pos-roi-val { font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 
     .pos-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 15px; font-size: 0.82rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 15px; font-size: 0.82rem;
     }
     .pos-item { display: flex; flex-direction: column; gap: 2px; }
     .pos-item-label { color: #848E9C; font-size: 0.72rem; }
@@ -162,7 +162,7 @@
 
   <div class="positions-wrapper" id="positionsContainer">
     <div class="position-card" style="text-align: center; color: #5E6673; padding: 20px;">
-      Không có vị thế nào đang mở.
+      Không có vị thế nào do Bot mở đang chạy.
     </div>
   </div>
 
@@ -296,6 +296,8 @@
     const valTotalSessions = document.getElementById('valTotalSessions');
     const valTotalPnl = document.getElementById('valTotalPnl');
 
+    let positionTimers = {};
+
     window.onload = () => {
         fetch('/api/config')
             .then(res => res.json())
@@ -329,6 +331,7 @@
         setInterval(fetchStatus, 2500);
         setInterval(fetchFundingTable, 5000);
         setInterval(fetchDashboardStats, 3000);
+        setInterval(updatePositionCountdowns, 1000);
     };
 
     function toggleAmountPlaceholder() {
@@ -361,6 +364,27 @@
         const mins = String(d.getMinutes()).padStart(2, '0');
         const secs = String(d.getSeconds()).padStart(2, '0');
         return `${hours}:${mins}:${secs}`;
+    }
+
+    function updatePositionCountdowns() {
+        const timerEls = document.querySelectorAll('.pos-timer');
+        timerEls.forEach(el => {
+            const targetTime = parseInt(el.getAttribute('data-target-time'));
+            if (!targetTime || isNaN(targetTime)) {
+                el.textContent = '--';
+                return;
+            }
+            const remainingSecs = Math.max(0, Math.floor((targetTime - Date.now()) / 1000));
+            if (remainingSecs <= 0) {
+                el.textContent = 'Hết giờ (Đang đóng)';
+                el.style.color = '#F03D4D';
+            } else {
+                const mins = Math.floor(remainingSecs / 60);
+                const secs = remainingSecs % 60;
+                el.textContent = `${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s còn lại`;
+                el.style.color = '#00C087';
+            }
+        });
     }
 
     function fetchLogs() {
@@ -557,7 +581,7 @@
                 valTotalPnl.className = parseFloat(data.totalPnl) >= 0 ? "stat-value text-green" : "stat-value text-red";
 
                 if (!data.positions || data.positions.length === 0) {
-                    positionsContainer.innerHTML = `<div class="position-card" style="text-align: center; color: #5E6673;">Không có vị thế nào đang mở.</div>`;
+                    positionsContainer.innerHTML = `<div class="position-card" style="text-align: center; color: #5E6673;">Không có vị thế nào do Bot mở đang chạy.</div>`;
                     return;
                 }
 
@@ -568,11 +592,17 @@
                     const pnlClass = isGreen ? 'text-green' : 'text-red';
                     const sideClass = p.side === 'LONG' ? 'badge-long' : 'badge-short';
                     const pnlSign = isGreen ? '+' : '';
+                    
                     const slPnlAmount = p.slPnlAmount || 0;
-                    const slPnlRoi = p.slPnl || 0;
-                    const slIsGreen = slPnlAmount >= 0;
-                    const slPnlClass = slIsGreen ? 'text-green' : 'text-red';
-                    const slPnlSign = slIsGreen ? '+' : '';
+                    const slPnlRoi = p.slPnlRoi || 0;
+                    
+                    const tpFixedPnlAmount = p.tpFixedPnlAmount || 0;
+                    const tpFixedPnlRoi = p.tpFixedPnlRoi || 0;
+
+                    const tpTrailingPnlAmount = p.tpTrailingPnlAmount || 0;
+                    const tpTrailingPnlRoi = p.tpTrailingPnlRoi || 0;
+
+                    const targetCloseTime = Date.now() + (p.remainingMs || 0);
 
                     cardsHtml += `
                         <div class="position-card" data-key="${key}">
@@ -589,29 +619,37 @@
                             </div>
                             <div class="pos-grid">
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Khối Lượng</span>
-                                    <span class="pos-item-value">${p.size}</span>
+                                    <span class="pos-item-label">Khối Lượng / Margin</span>
+                                    <span class="pos-item-value">${p.size} (${p.margin.toFixed(2)} USDT)</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Ký Quỹ (Margin)</span>
-                                    <span class="pos-item-value">${p.margin.toFixed(2)} USDT</span>
+                                    <span class="pos-item-label">Giá Entry / Giá Hiện Tại</span>
+                                    <span class="pos-item-value">${formatDynamicPrice(p.entryPrice)} / ${formatDynamicPrice(p.markPrice)}</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Giá Vào (Entry)</span>
-                                    <span class="pos-item-value">${formatDynamicPrice(p.entryPrice)}</span>
+                                    <span class="pos-item-label">Thời Gian Mở Lệnh</span>
+                                    <span class="pos-item-value">${formatOpenTime(p.openTime)}</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Giá Hiện Tại</span>
-                                    <span class="pos-item-value">${formatDynamicPrice(p.markPrice)}</span>
+                                    <span class="pos-item-label">Bộ Đếm Tự Đóng Lệnh</span>
+                                    <span class="pos-item-value text-green pos-timer" data-target-time="${targetCloseTime}">Đang tính...</span>
+                                </div>
+
+                                <div class="pos-item">
+                                    <span class="pos-item-label">Cắt Lỗ (SL)</span>
+                                    <span class="pos-item-value text-red">Giá ${formatDynamicPrice(p.slPrice)} | PnL: ${slPnlAmount.toFixed(4)} USDT (${slPnlRoi.toFixed(2)}%)</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">Giá Dừng (SL/TP)</span>
-                                    <span class="pos-item-value">${formatDynamicPrice(p.slPrice)}</span>
+                                    <span class="pos-item-label">Chốt Lời Cứng (TP Cứng)</span>
+                                    <span class="pos-item-value text-green">Giá ${formatDynamicPrice(p.tpFixedPrice)} | PnL: +${tpFixedPnlAmount.toFixed(4)} USDT (+${tpFixedPnlRoi.toFixed(2)}%)</span>
                                 </div>
-                                <div class="pos-item">
-                                    <span class="pos-item-label">PnL Dự Kiến Khi Chạm SL/TP</span>
-                                    <span class="pos-item-value ${slPnlClass}">${slPnlSign}${slPnlAmount.toFixed(4)} USDT (${slPnlSign}${slPnlRoi.toFixed(2)}%)</span>
+
+                                ${p.enableTrailing ? `
+                                <div class="pos-item" style="grid-column: 1 / -1;">
+                                    <span class="pos-item-label">Trailing TP (Tụt ${p.tpTrailingPct}\% từ Đỉnh/Đáy ${formatDynamicPrice(p.extremePrice)})</span>
+                                    <span class="pos-item-value text-green">Giá Chốt: ${formatDynamicPrice(p.tpTrailingPrice)} | PnL Trailing: ${tpTrailingPnlAmount >= 0 ? '+' : ''}${tpTrailingPnlAmount.toFixed(4)} USDT (${tpTrailingPnlRoi >= 0 ? '+' : ''}${tpTrailingPnlRoi.toFixed(2)}%)</span>
                                 </div>
+                                ` : ''}
                             </div>
                             <div class="pos-actions">
                                 <button class="btn-close-pos" onclick="forceClosePosition('${p.coin}', '${p.side}')">Đóng Lệnh Thị Trường</button>
@@ -620,6 +658,7 @@
                     `;
                 });
                 positionsContainer.innerHTML = cardsHtml;
+                updatePositionCountdowns();
             }).catch(e => {});
     }
   </script>
