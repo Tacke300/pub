@@ -99,7 +99,7 @@
     }
     input:focus { border-color: #FCD535; background-color: #181A20; }
     input::placeholder { color: #5E6673; }
-    .radio-group { display: flex; gap: 20px; align-items: center; margin-bottom: 5px; }
+    .radio-group { display: flex; gap: 20px; align-items: center; margin-bottom: 5px; flex-wrap: wrap; }
     .radio-item { display: flex; align-items: center; gap: 8px; cursor: pointer; color: #EAECEF; font-size: 0.9rem; }
     input[type="radio"] {
       appearance: none; width: 16px; height: 16px; border: 2px solid #848E9C; border-radius: 50%; background-color: transparent; position: relative; cursor: pointer; margin: 0;
@@ -218,7 +218,7 @@
                 <div class="radio-group">
                     <label class="radio-item"><input type="radio" name="tradeMode" value="both" checked> Cả 2</label>
                     <label class="radio-item"><input type="radio" name="tradeMode" value="main"> Chỉ Main (Before)</label>
-                    <label class="radio-item"><input type="radio" name="tradeMode" value="buffer"> Chỉ Buffer (After)</label>
+                    <label class="radio-item"><input type="radio" name="tradeMode" value="always"> Chế Độ Always</label>
                 </div>
             </div>
             <div class="input-group">
@@ -239,27 +239,34 @@
 
         <div class="row" style="margin-top: 10px;">
             <div class="input-group">
-                <div class="input-label">Mở Lệnh Buffer / After Funding (ms trước FD)</div>
-                <input type="number" id="longOffset" value="1500" placeholder="Mặc định: 1500">
-            </div>
-            <div class="input-group">
                 <div class="input-label">Mở Lệnh Main / Before Funding (ms)</div>
                 <input type="number" id="shortOffset" value="0" placeholder="Mặc định: 0">
             </div>
+            <div class="input-group">
+                <div class="input-label">Thời Gian Giữ Lệnh Chế Độ Always (Phút)</div>
+                <input type="number" id="holdMinutesVal" value="15" placeholder="Mặc định: 15 phút">
+            </div>
         </div>
-        <div class="helper-text">* Tinh chỉnh ms (mili-giây) để khắc phục độ trễ mạng VPS. Lúc Test Nhanh cũng sẽ dựa theo khoảng cách ms này.</div>
 
         <div class="row" style="margin-top: 10px;">
             <div class="input-group">
-                <div class="input-label">Khoảng TP Trailing / SL Dương (% theo Giá Entry)</div>
-                <input type="number" step="0.1" id="tpVal" value="1">
+                <div class="input-label">Khoảng TP Cứng (% theo Giá Entry)</div>
+                <input type="number" step="0.1" id="tpFixedVal" value="1" placeholder="VD: 1 => Đạt 1% sẽ lock SL Dương">
             </div>
             <div class="input-group">
-                <div class="input-label">Khoảng SL (% theo Giá Entry)</div>
+                <div class="input-label">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #EAECEF;">
+                        <input type="checkbox" id="enableTrailing"> <b>Bật Trailing TP</b>
+                    </label>
+                </div>
+                <input type="number" step="0.1" id="tpTrailingVal" value="1" placeholder="Tụt % từ Đỉnh/Đáy (theo Entry)">
+            </div>
+            <div class="input-group">
+                <div class="input-label">Khoảng Cắt Lỗ SL (% theo Giá Entry)</div>
                 <input type="number" step="0.1" id="slVal" value="2">
             </div>
         </div>
-        <div class="helper-text">* SL và Trailing TP được tính theo % biến động của GIÁ ENTRY. Chống thanh lý mặc định bật: Đóng toàn bộ khi Margin < 10% Balance.</div>
+        <div class="helper-text">* SL, TP Cứng và Trailing TP được tính theo % biến động GIÁ ENTRY. Chống thanh lý bật tự động: Đóng toàn bộ khi Margin / Khả dụng <= 15% Balance. Tất cả lệnh đều ép tài khoản về chế độ CROSS.</div>
     </div>
 
     <div class="button-row">
@@ -302,12 +309,18 @@
                 if(config.fundingThreshold !== undefined) document.getElementById('fundingThresholdVal').value = config.fundingThreshold;
                 document.getElementById('amountVal').value = config.amountValue;
                 if(config.amountMode) document.querySelector(`input[name="amountMode"][value="${config.amountMode}"]`).checked = true;
-                if(config.tradeMode) document.querySelector(`input[name="tradeMode"][value="${config.tradeMode}"]`).checked = true;
+                if(config.tradeMode) {
+                    const targetMode = (config.tradeMode === 'buffer' || config.tradeMode === 'after') ? 'both' : config.tradeMode;
+                    const radio = document.querySelector(`input[name="tradeMode"][value="${targetMode}"]`);
+                    if(radio) radio.checked = true;
+                }
                 if(config.sortMode) document.querySelector(`input[name="sortMode"][value="${config.sortMode}"]`).checked = true;
                 
-                document.getElementById('longOffset').value = config.longOffsetMs || 1500;
                 document.getElementById('shortOffset').value = config.shortOffsetMs || 0;
-                document.getElementById('tpVal').value = config.tpPercent || 1;
+                document.getElementById('holdMinutesVal').value = config.holdMinutes || 15;
+                document.getElementById('tpFixedVal').value = config.tpFixedPercent || config.tpPercent || 1;
+                document.getElementById('enableTrailing').checked = !!config.enableTrailing;
+                document.getElementById('tpTrailingVal').value = config.tpTrailingPercent || 1;
                 document.getElementById('slVal').value = config.slPercent || 2;
                 toggleAmountPlaceholder();
             }).catch(e => console.log("Không thể load cấu hình mặc định:", e));
@@ -464,15 +477,17 @@
         const secretKey = document.getElementById('secretKey').value;
         const amountMode = document.querySelector('input[name="amountMode"]:checked').value;
         const amountValue = document.getElementById('amountVal').value;
-        const tp = document.getElementById('tpVal').value;
+        const tpFixed = document.getElementById('tpFixedVal').value;
+        const enableTrailing = document.getElementById('enableTrailing').checked;
+        const tpTrailing = document.getElementById('tpTrailingVal').value;
         const sl = document.getElementById('slVal').value;
-        const longMs = document.getElementById('longOffset').value;
         const shortMs = document.getElementById('shortOffset').value;
         const threshold = document.getElementById('fundingThresholdVal').value;
         const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
+        const holdMinutes = document.getElementById('holdMinutesVal').value;
 
-        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tp=${tp}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}`;
+        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
         await fetch(url);
         fetchStatus();
     }
@@ -487,15 +502,17 @@
         const secretKey = document.getElementById('secretKey').value;
         const amountMode = document.querySelector('input[name="amountMode"]:checked').value;
         const amountValue = document.getElementById('amountVal').value;
-        const tp = document.getElementById('tpVal').value;
+        const tpFixed = document.getElementById('tpFixedVal').value;
+        const enableTrailing = document.getElementById('enableTrailing').checked;
+        const tpTrailing = document.getElementById('tpTrailingVal').value;
         const sl = document.getElementById('slVal').value;
-        const longMs = document.getElementById('longOffset').value;
         const shortMs = document.getElementById('shortOffset').value;
         const threshold = document.getElementById('fundingThresholdVal').value;
         const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
+        const holdMinutes = document.getElementById('holdMinutesVal').value;
 
-        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tp=${tp}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}`;
+        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
         await fetch(url);
         fetchStatus();
     }
@@ -592,7 +609,7 @@
                                     <span class="pos-item-value">${formatDynamicPrice(p.slPrice)}</span>
                                 </div>
                                 <div class="pos-item">
-                                    <span class="pos-item-label">PnL Dự Kiến Khi Chạm SL</span>
+                                    <span class="pos-item-label">PnL Dự Kiến Khi Chạm SL/TP</span>
                                     <span class="pos-item-value ${slPnlClass}">${slPnlSign}${slPnlAmount.toFixed(4)} USDT (${slPnlSign}${slPnlRoi.toFixed(2)}%)</span>
                                 </div>
                             </div>
