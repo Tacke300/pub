@@ -26,18 +26,17 @@ let userConfig = {
     enableTrailing: false,
     tpTrailingPercent: 1,
     slPercent: 2,
-    longOffsetMs: 1500,
     shortOffsetMs: 0,
     fundingThreshold: 0.3,
-    tradeMode: 'both',
+    tradeMode: 'main',
     sortMode: 'pnl',
     holdMinutes: 15,
     enableAlwaysPriceTrigger: false,
-    alwaysPriceChangePct: 5
+    alwaysPriceTriggerPct: 5
 };
 
 let blacklistMap = {};
-let alwaysPriceLock = {};
+let alwaysPriceLocks = {}; 
 
 function isBlacklisted(symbol) {
     const unlockTime = blacklistMap[symbol];
@@ -58,8 +57,7 @@ function unlockBlacklistWith15MinDelay(symbol) {
 function saveDataPositionsToFile() {
     try {
         const dataObj = {
-            currentMainPositions,
-            currentBufferPositions
+            currentMainPositions
         };
         fs.writeFileSync(DATA_FILE, JSON.stringify(dataObj, null, 2), 'utf8');
     } catch (e) {}
@@ -71,12 +69,11 @@ function loadDataPositionsFromFile() {
             const raw = fs.readFileSync(DATA_FILE, 'utf8');
             const data = JSON.parse(raw);
             return {
-                mainPositions: Array.isArray(data.currentMainPositions) ? data.currentMainPositions : (Array.isArray(data.mainPositions) ? data.mainPositions : []),
-                bufferPositions: Array.isArray(data.currentBufferPositions) ? data.currentBufferPositions : (Array.isArray(data.bufferPositions) ? data.bufferPositions : [])
+                mainPositions: Array.isArray(data.currentMainPositions) ? data.currentMainPositions : (Array.isArray(data.mainPositions) ? data.mainPositions : [])
             };
         }
     } catch (e) {}
-    return { mainPositions: [], bufferPositions: [] };
+    return { mainPositions: [] };
 }
 
 function getErrorMessage(error) {
@@ -119,12 +116,9 @@ let botRunning = false;
 let botStartTime = null;
 
 let currentMainPositions = [];
-let currentBufferPositions = [];
 
 let mainCheckInterval = null;
-let bufferCheckInterval = null;
 let schedulerTimeout = null;
-let scheduledBufferTimeout = null;
 let scheduledMainTimeout = null;
 let antiLiquidationInterval = null;
 
@@ -138,7 +132,7 @@ const MAX_LOG_SIZE = 1000;
 const logCounts = {};
 const LOG_COOLDOWN_MS = 60000;
 
-const WEB_SERVER_PORT = 9998;
+const WEB_SERVER_PORT = 9999;
 
 let globalStats = {
     totalSessions: 0,
@@ -219,7 +213,6 @@ function saveStateToFile() {
     try {
         const stateData = {
             currentMainPositions,
-            currentBufferPositions,
             botRunning,
             globalStats
         };
@@ -238,14 +231,6 @@ function loadStateFromFile() {
                 currentMainPositions = [data.currentMainPosition];
             } else {
                 currentMainPositions = [];
-            }
-
-            if (Array.isArray(data.currentBufferPositions)) {
-                currentBufferPositions = data.currentBufferPositions;
-            } else if (data.currentBufferPosition) {
-                currentBufferPositions = [data.currentBufferPosition];
-            } else {
-                currentBufferPositions = [];
             }
 
             if (data.botRunning !== undefined) botRunning = data.botRunning;
@@ -593,12 +578,6 @@ function getFilteredCandidates(allFunding, reqThreshold = null, targetFundingTim
 
     valid = valid.filter(item => !isBlacklisted(item.symbol));
 
-    valid = valid.filter(item => {
-        const isOpenInMain = currentMainPositions.some(p => p.symbol === item.symbol);
-        const isOpenInBuffer = currentBufferPositions.some(b => b.symbol === item.symbol);
-        return !isOpenInMain && !isOpenInBuffer;
-    });
-
     if (targetFundingTime !== null) {
         valid = valid.filter(item => Math.abs(item.nextFundingTime - targetFundingTime) <= 60000);
     }
@@ -615,6 +594,10 @@ function getFilteredCandidates(allFunding, reqThreshold = null, targetFundingTim
     return valid;
 }
 
+function hasActivePositionForSymbol(symbol) {
+    return currentMainPositions.some(p => p.symbol === symbol);
+}
+
 async function executeAlwaysScan() {
     if (!botRunning || isOpeningPosition) return;
 
@@ -623,62 +606,56 @@ async function executeAlwaysScan() {
         if (!allFunding || allFunding.length === 0) return;
 
         const candidates = getFilteredCandidates(allFunding, userConfig.fundingThreshold, null);
-
-        const candidateSymbols = new Set(candidates.map(c => c.symbol));
-        Object.keys(alwaysPriceLock).forEach(sym => {
-            if (!candidateSymbols.has(sym)) {
-                delete alwaysPriceLock[sym];
-            }
-        });
-
-        if (candidates.length === 0) return;
-
-        const best = candidates[0];
-
-        if (currentMainPositions.some(p => p.symbol === best.symbol) || currentBufferPositions.some(b => b.symbol === best.symbol)) {
+        if (candidates.length === 0) {
+            alwaysPriceLocks = {};
             return;
         }
 
+        const best = candidates[0];
         const leverage = best.lev;
         const isNegative = best.fdType === 'negative';
         const mainSide = isNegative ? 'SHORT' : 'LONG';
+
+        if (hasActivePositionForSymbol(best.symbol)) {
+            log('INFO', 'ALWAYS', `ℹ Coin ${best.symbol} hiện đã có vị thế mở. Bỏ qua để tránh mở trùng.`);
+            return;
+        }
 
         const currentPrice = await getCurrentPrice(best.symbol);
         if (!currentPrice) return;
 
         if (userConfig.enableAlwaysPriceTrigger) {
-            const reqChangePct = userConfig.alwaysPriceChangePct || 5;
-            if (!alwaysPriceLock[best.symbol]) {
-                alwaysPriceLock[best.symbol] = {
+            const triggerPct = userConfig.alwaysPriceTriggerPct || 0;
+            let lock = alwaysPriceLocks[best.symbol];
+
+            if (!lock || lock.fdType !== best.fdType) {
+                alwaysPriceLocks[best.symbol] = {
                     lockedPrice: currentPrice,
-                    fdType: best.fdType,
-                    lockTime: Date.now()
+                    lockedTime: Date.now(),
+                    fdType: best.fdType
                 };
-                log('INFO', 'ALWAYS', `🔒 [ALWAYS] Đã khóa giá ${best.symbol}: ${formatPrice(currentPrice)} | FD: ${(parseFloat(best.lastFundingRate)*100).toFixed(4)}% | Chờ giá ${mainSide === 'LONG' ? 'tăng' : 'giảm'} thêm ${reqChangePct}%`);
+                log('INFO', 'ALWAYS', `🔒 [ALWAYS LOCK] ${best.symbol} đạt FD ${(parseFloat(best.lastFundingRate)*100).toFixed(4)}% | Đã khóa giá mốc: ${formatPrice(currentPrice)} | Chờ giá ${mainSide === 'LONG' ? 'TĂNG' : 'GIẢM'} ${triggerPct}%...`);
                 return;
-            }
-
-            const lockedPrice = alwaysPriceLock[best.symbol].lockedPrice;
-            let isTriggered = false;
-
-            if (mainSide === 'LONG') {
-                const targetPrice = lockedPrice * (1 + reqChangePct / 100);
-                if (currentPrice >= targetPrice) {
-                    isTriggered = true;
-                }
             } else {
-                const targetPrice = lockedPrice * (1 - reqChangePct / 100);
-                if (currentPrice <= targetPrice) {
-                    isTriggered = true;
+                const lockedPrice = lock.lockedPrice;
+                if (mainSide === 'LONG') {
+                    const targetPrice = lockedPrice * (1 + triggerPct / 100);
+                    if (currentPrice < targetPrice) {
+                        const pctMoved = ((currentPrice - lockedPrice) / lockedPrice) * 100;
+                        log('INFO', 'ALWAYS', `⏳ [ALWAYS CHECK] ${best.symbol} LONG | Giá khóa: ${formatPrice(lockedPrice)} | Giá HT: ${formatPrice(currentPrice)} (${pctMoved.toFixed(2)}% / ${triggerPct}%)`);
+                        return;
+                    }
+                } else {
+                    const targetPrice = lockedPrice * (1 - triggerPct / 100);
+                    if (currentPrice > targetPrice) {
+                        const pctMoved = ((lockedPrice - currentPrice) / lockedPrice) * 100;
+                        log('INFO', 'ALWAYS', `⏳ [ALWAYS CHECK] ${best.symbol} SHORT | Giá khóa: ${formatPrice(lockedPrice)} | Giá HT: ${formatPrice(currentPrice)} (${pctMoved.toFixed(2)}% / ${triggerPct}%)`);
+                        return;
+                    }
                 }
+                log('SUCCESS', 'ALWAYS', `🔥 [ALWAYS TRIGGER] ${best.symbol} đạt biến động giá ${triggerPct}% từ mốc ${formatPrice(lockedPrice)} -> Giá HT: ${formatPrice(currentPrice)}! Kích hoạt mở lệnh ${mainSide}`);
+                delete alwaysPriceLocks[best.symbol];
             }
-
-            if (!isTriggered) {
-                return;
-            }
-
-            log('SUCCESS', 'ALWAYS', `⚡ [ALWAYS TRIGGER] ${best.symbol} giá đã ${mainSide === 'LONG' ? 'tăng' : 'giảm'} đạt ${reqChangePct}% từ mốc khóa ${formatPrice(lockedPrice)} -> Giá hiện tại: ${formatPrice(currentPrice)}`);
-            delete alwaysPriceLock[best.symbol];
         }
 
         isOpeningPosition = true;
@@ -692,7 +669,6 @@ async function executeAlwaysScan() {
         const balance = parseFloat(acc.assets.find(a => a.asset === 'USDT')?.availableBalance || 0);
 
         const symbolInfo = exchangeInfoCache[best.symbol];
-
         let initialMargin = userConfig.amountMode === 'percent' ? balance * (userConfig.amountValue / 100) : userConfig.amountValue;
         let quantity = calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage);
 
@@ -757,18 +733,19 @@ async function executeT2MinuteSingleScan(targetFundingTime) {
         }
 
         const best = candidates[0];
-
-        if (currentMainPositions.some(p => p.symbol === best.symbol) || currentBufferPositions.some(b => b.symbol === best.symbol)) {
-            log('WARN', 'SCAN', `⚠️ Coin ${best.symbol} đang có vị thế mở (Always/Before). Bỏ qua để tránh mở trùng.`);
-            isOpeningPosition = false;
-            return;
-        }
-
         const leverage = best.lev;
         const nowServer = Date.now() + serverTimeOffset;
         const timeStr = new Date(targetFundingTime + 7*3600000).toISOString().substr(11, 8);
 
-        log('SUCCESS', 'SCAN', `🎯 [CHỌN COIN] Symbol: ${best.symbol} | Funding Rate: ${(parseFloat(best.lastFundingRate) * 100).toFixed(4)}% | Đòn bẩy: ${leverage}x | Est PnL: ${best.estPnl.toFixed(2)}% | Funding Time: ${timeStr} UTC+7`);
+        if (hasActivePositionForSymbol(best.symbol)) {
+            log('INFO', 'BEFORE', `ℹ Coin ${best.symbol} đã có vị thế mở (VD từ Chế độ Always). Bỏ qua lượt này để tránh mở trùng.`);
+            isOpeningPosition = false;
+            const timeToNextFd = targetFundingTime - nowServer;
+            schedulerTimeout = setTimeout(armT2MinuteScheduler, Math.max(timeToNextFd + 10000, 30000));
+            return;
+        }
+
+        log('SUCCESS', 'SCAN', `🎯 [CHỌN COIN BEFORE] Symbol: ${best.symbol} | Funding Rate: ${(parseFloat(best.lastFundingRate) * 100).toFixed(4)}% | Đòn bẩy: ${leverage}x | Est PnL: ${best.estPnl.toFixed(2)}% | Funding Time: ${timeStr} UTC+7`);
 
         await setLeverage(best.symbol, leverage);
         await ensureCrossMargin(best.symbol);
@@ -784,31 +761,22 @@ async function executeT2MinuteSingleScan(targetFundingTime) {
         let quantity = calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage);
 
         const isNegative = best.fdType === 'negative';
-        const bufferSide = isNegative ? 'LONG' : 'SHORT';
         const mainSide = isNegative ? 'SHORT' : 'LONG';
 
-        const longOffsetMs = userConfig.longOffsetMs !== undefined ? userConfig.longOffsetMs : 1500;
         const shortOffsetMs = userConfig.shortOffsetMs !== undefined ? userConfig.shortOffsetMs : 0;
-
-        const delayLong = targetFundingTime - longOffsetMs - nowServer;
-        const delayShort = targetFundingTime + shortOffsetMs - nowServer;
-
-        const tradeMode = userConfig.tradeMode || 'both';
-
-        clearTimeout(scheduledBufferTimeout);
-        if (tradeMode === 'both' && delayLong > 0) {
-            scheduledBufferTimeout = setTimeout(() => {
-                if (botRunning) openBufferPosition(best.symbol, leverage, balance, bufferSide, false).catch(e => {});
-            }, delayLong);
-        }
+        const delayShort = (targetFundingTime + shortOffsetMs) - nowServer;
 
         clearTimeout(scheduledMainTimeout);
-        if ((tradeMode === 'both' || tradeMode === 'main') && delayShort >= 0) {
+        if (delayShort >= 0) {
             scheduledMainTimeout = setTimeout(() => {
                 if (botRunning) {
                     openMainPosition(best.symbol, quantity, targetFundingTime, mainSide, false, best.estPnl).catch(e => {});
                 }
             }, delayShort);
+        } else {
+            if (botRunning) {
+                openMainPosition(best.symbol, quantity, targetFundingTime, mainSide, false, best.estPnl).catch(e => {});
+            }
         }
 
         const msAfterFunding = targetFundingTime + 30000 - Date.now();
@@ -821,118 +789,8 @@ async function executeT2MinuteSingleScan(targetFundingTime) {
     }
 }
 
-async function openBufferPosition(symbol, leverage, balance, side, isTest = false) {
-    try {
-        await ensureCrossMargin(symbol);
-        const symbolInfo = exchangeInfoCache[symbol];
-        const currentPrice = await getCurrentPrice(symbol);
-        if(!currentPrice) throw new Error("Không thể lấy giá mở lệnh Buffer");
-        
-        let initialMargin = userConfig.amountMode === 'percent' 
-            ? balance * (userConfig.amountValue / 100) 
-            : userConfig.amountValue;
-            
-        let quantity = calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage);
-
-        await executeMarketOrderWithMinVolCheck(symbol, side, side, quantity, currentPrice);
-        
-        const slDistance = currentPrice * (userConfig.slPercent / 100);
-        const slPrice = side === 'LONG' ? currentPrice - slDistance : currentPrice + slDistance;
-
-        log('TRADE', 'BUFFER', `🚀 Mở vị thế Buffer | Coin: ${symbol} | Hướng: ${side} | Qty: ${formatNumber(quantity)} | Đòn bẩy: ${leverage}x | Entry: ${formatPrice(currentPrice)}`);
-
-        addToBlacklist(symbol);
-
-        const bufPos = { 
-            symbol, side, quantity, entryPrice: currentPrice, slPrice, openTime: Date.now(), isTest,
-            margin: (quantity * currentPrice) / leverage, leverage
-        };
-        currentBufferPositions.push(bufPos);
-        
-        saveDataPositionsToFile();
-        saveStateToFile();
-        
-        if (!bufferCheckInterval) bufferCheckInterval = setInterval(manageBufferPositions, 1200);
-
-    } catch (error) {
-        log('ERROR', 'BUFFER', `✖ Lỗi mở lệnh Buffer ${side} ${symbol}: ${getErrorMessage(error)}`);
-    }
-}
-
-let isClosingBuffer = false;
-async function manageBufferPositions() {
-    if (currentBufferPositions.length === 0 || isClosingBuffer) return;
-    isClosingBuffer = true;
-    try {
-        for (let i = currentBufferPositions.length - 1; i >= 0; i--) {
-            const buf = currentBufferPositions[i];
-            const currentPrice = await getCurrentPrice(buf.symbol);
-            if (!currentPrice) continue;
-            
-            const isLong = buf.side === 'LONG';
-            let isSlHit = false;
-
-            if (isLong && currentPrice <= buf.slPrice) isSlHit = true;
-            if (!isLong && currentPrice >= buf.slPrice) isSlHit = true;
-
-            if (isSlHit) {
-                log('WARN', 'SL', `⚠ Kích hoạt Stop Loss Buffer | Coin: ${buf.symbol} | Entry: ${formatPrice(buf.entryPrice)} | Giá hiện tại: ${formatPrice(currentPrice)}`);
-                await closeBufferInternal(buf, 'Chạm Stop Loss Buffer', buf.isTest);
-            }
-        }
-    } catch (e) { 
-    } finally {
-        isClosingBuffer = false;
-    }
-}
-
-async function closeBufferInternal(bufPos, reason = 'Thời gian', isTest = false) {
-    if (!bufPos) return;
-    const { symbol, side, openTime, entryPrice } = bufPos;
-    const orderSide = side === 'LONG' ? 'SELL' : 'BUY';
-    const duration = formatDuration(openTime);
-    
-    currentBufferPositions = currentBufferPositions.filter(b => b !== bufPos); 
-
-    saveDataPositionsToFile();
-    saveStateToFile();
-
-    if (currentBufferPositions.length === 0 && bufferCheckInterval) { 
-        clearInterval(bufferCheckInterval); 
-        bufferCheckInterval = null; 
-    }
-
-    try {
-        const positions = await callSignedAPI('/fapi/v2/positionRisk', 'GET', { symbol });
-        const pos = positions.find(p => p.symbol === symbol && (p.positionSide === side || p.positionSide === 'BOTH'));
-        const actualAmt = pos ? Math.abs(parseFloat(pos.positionAmt)) : 0;
-        const markPrice = pos ? parseFloat(pos.markPrice) : entryPrice;
-
-        if (actualAmt > 0) {
-            await callSignedAPI('/fapi/v1/order', 'POST', {
-                symbol: symbol, side: orderSide, positionSide: pos.positionSide, type: 'MARKET', quantity: formatQty(symbol, actualAmt)
-            });
-            log('SUCCESS', 'BUFFER', `🛑 Đóng vị thế Buffer | Coin: ${symbol} | Hướng: ${side} | Giá thoát: ${formatPrice(markPrice)} | Lý do: ${reason} | Thời gian giữ: ${duration}`);
-            fetchAndLogRealizedPnL(symbol, side, isTest);
-        }
-    } catch (error) {
-        log('WARN', 'BUFFER', `⚠ Lỗi đóng Buffer ${symbol}: ${getErrorMessage(error)}.`);
-        await aggressiveCleanup(symbol);
-    } finally {
-        const remainingForSymbol = currentMainPositions.some(p => p.symbol === symbol) || currentBufferPositions.some(b => b.symbol === symbol);
-        if (!remainingForSymbol) {
-            unlockBlacklistWith15MinDelay(symbol);
-        }
-    }
-}
-
 let isClosingMain = false;
 async function openMainPosition(symbol, quantity, nextFundingTime, side, isTest = false, estPnl = 0) {
-    const bufPos = currentBufferPositions.find(b => b.symbol === symbol);
-    if (bufPos) {
-        await closeBufferInternal(bufPos, 'Chuyển giao Main', isTest); 
-    }
-    
     try {
         await ensureCrossMargin(symbol);
         const currentPrice = await getCurrentPrice(symbol);
@@ -961,7 +819,7 @@ async function openMainPosition(symbol, quantity, nextFundingTime, side, isTest 
         }
 
         const margin = (quantity * realEntryPrice) / (lev || 1);
-        log('TRADE', 'MAIN', `🚀 Mở vị thế Main | Coin: ${symbol} | Hướng: ${side} | Qty: ${formatNumber(quantity)} | Đòn bẩy: ${lev}x | Margin: ${margin.toFixed(2)} USDT | Entry: ${formatPrice(realEntryPrice)}`);
+        log('TRADE', 'MAIN', `🚀 Mở vị thế Main Before | Coin: ${symbol} | Hướng: ${side} | Qty: ${formatNumber(quantity)} | Đòn bẩy: ${lev}x | Margin: ${margin.toFixed(2)} USDT | Entry: ${formatPrice(realEntryPrice)}`);
 
         addToBlacklist(symbol);
 
@@ -1139,7 +997,7 @@ function cleanupAfterClose(symbol) {
     saveDataPositionsToFile();
     saveStateToFile();
 
-    const remainingForSymbol = currentMainPositions.some(p => p.symbol === symbol) || currentBufferPositions.some(b => b.symbol === symbol);
+    const remainingForSymbol = currentMainPositions.some(p => p.symbol === symbol);
     if (!remainingForSymbol) {
         unlockBlacklistWith15MinDelay(symbol);
     }
@@ -1149,7 +1007,7 @@ function cleanupAfterClose(symbol) {
         mainCheckInterval = null; 
     }
     setTimeout(async () => {
-        const stillRemaining = currentMainPositions.some(p => p.symbol === symbol) || currentBufferPositions.some(b => b.symbol === symbol);
+        const stillRemaining = currentMainPositions.some(p => p.symbol === symbol);
         if (!stillRemaining) {
             await aggressiveCleanup(symbol);
         }
@@ -1183,7 +1041,6 @@ function startAntiLiquidationMonitor() {
                     }
                 }
                 currentMainPositions = [];
-                currentBufferPositions = [];
                 saveDataPositionsToFile();
                 saveStateToFile();
                 log('SUCCESS', 'POSITION', `🛑 Đã ĐÓNG TOÀN BỘ vị thế trên tài khoản. Bot tự động TẮT để bảo toàn vốn.`);
@@ -1197,7 +1054,6 @@ async function restoreActivePositionsOnStartup() {
     const dataSaved = loadDataPositionsFromFile();
     
     let candidateMains = dataSaved.mainPositions.length > 0 ? dataSaved.mainPositions : currentMainPositions;
-    let candidateBuffers = dataSaved.bufferPositions.length > 0 ? dataSaved.bufferPositions : currentBufferPositions;
 
     if (!userConfig.apiKey || !userConfig.secretKey) return;
     try {
@@ -1220,20 +1076,6 @@ async function restoreActivePositionsOnStartup() {
         }
         currentMainPositions = validMains;
 
-        const validBuffers = [];
-        for (const bufPos of candidateBuffers) {
-            const pos = positions.find(p => p.symbol === bufPos.symbol && (p.positionSide === bufPos.side || p.positionSide === 'BOTH'));
-            if (pos) {
-                const actualAmt = Math.abs(parseFloat(pos.positionAmt));
-                if (actualAmt > 0 && (Math.abs(actualAmt - parseFloat(bufPos.quantity)) < 0.001 || Math.abs(actualAmt - parseFloat(bufPos.quantity)) / actualAmt < 0.02)) {
-                    log('SUCCESS', 'SYNC', `✓ Khôi phục quản lý BUFFER ${bufPos.side} ${bufPos.symbol}`);
-                    validBuffers.push(bufPos);
-                    addToBlacklist(bufPos.symbol);
-                }
-            }
-        }
-        currentBufferPositions = validBuffers;
-
         saveDataPositionsToFile();
         saveStateToFile();
 
@@ -1241,12 +1083,6 @@ async function restoreActivePositionsOnStartup() {
             botRunning = true;
             if (mainCheckInterval) clearInterval(mainCheckInterval);
             mainCheckInterval = setInterval(manageMainPositions, 1200);
-        }
-
-        if (currentBufferPositions.length > 0) {
-            botRunning = true;
-            if (bufferCheckInterval) clearInterval(bufferCheckInterval);
-            bufferCheckInterval = setInterval(manageBufferPositions, 1200);
         }
 
         if (botRunning) {
@@ -1302,193 +1138,225 @@ async function getDashboardDataCached() {
                 (m.side === p.positionSide || p.positionSide === 'BOTH')
             );
 
-            const isMatchBuffer = currentBufferPositions.find(b => 
-                b.symbol === p.symbol && 
-                (b.side === p.positionSide || p.positionSide === 'BOTH')
-            );
-
-            if (!isMatchMain && !isMatchBuffer) {
+            if (!isMatchMain) {
                 continue;
             }
 
-            let deepest = markPrice;
-            let openTime = Date.now();
-            let posType = 'MAIN';
-            let nextFundingTime = null;
-
-            if (isMatchMain) {
-                deepest = isMatchMain.extremePrice || markPrice;
-                openTime = isMatchMain.openTime || Date.now();
-                posType = isMatchMain.isTest ? 'TEST MAIN' : 'MAIN';
-                nextFundingTime = isMatchMain.nextFundingTime || null;
-            } else if (isMatchBuffer) {
-                deepest = markPrice;
-                openTime = isMatchBuffer.openTime || Date.now();
-                posType = isMatchBuffer.isTest ? 'TEST BUFFER' : 'BUFFER';
-            }
+            let deepest = isMatchMain.extremePrice || markPrice;
+            let openTime = isMatchMain.openTime || Date.now();
+            let posType = isMatchMain.isTest ? 'TEST MAIN' : 'MAIN';
+            let nextFundingTime = isMatchMain.nextFundingTime || null;
 
             const slPct = userConfig.slPercent || 2;
             const tpFixedPct = userConfig.tpFixedPercent || 1;
-            const enableTrailing = userConfig.enableTrailing || false;
             const tpTrailingPct = userConfig.tpTrailingPercent || 1;
-            const holdMins = userConfig.holdMinutes || 15;
+            const enableTrailing = userConfig.enableTrailing || false;
 
-            const slPrice = isLong ? 
-                entryPrice - (entryPrice * (slPct / 100)) : 
-                entryPrice + (entryPrice * (slPct / 100));
-            const slPnlRoi = -slPct * lev;
-            const slPnlAmount = margin * (slPnlRoi / 100);
-
-            const tpFixedPrice = isLong ? 
-                entryPrice + (entryPrice * (tpFixedPct / 100)) : 
-                entryPrice - (entryPrice * (tpFixedPct / 100));
-            const tpFixedPnlRoi = tpFixedPct * lev;
-            const tpFixedPnlAmount = margin * (tpFixedPnlRoi / 100);
-
-            let extremePrice = deepest || entryPrice;
-            let maxGainPct = isLong ? 
-                ((extremePrice - entryPrice) / entryPrice) * 100 : 
-                ((entryPrice - extremePrice) / entryPrice) * 100;
-
-            let isReached = maxGainPct >= tpFixedPct;
+            const slPrice = isLong ? entryPrice * (1 - slPct / 100) : entryPrice * (1 + slPct / 100);
+            const tpFixedPrice = isLong ? entryPrice * (1 + tpFixedPct / 100) : entryPrice * (1 - tpFixedPct / 100);
             
             let tpTrailingPrice = 0;
-            let tpTrailingPnlRoi = 0;
-            let tpTrailingPnlAmount = 0;
-
-            if (enableTrailing) {
-                if (!isReached) {
-                    tpTrailingPrice = isLong ? 
-                        entryPrice * (1 + (tpFixedPct + tpTrailingPct) / 100) : 
-                        entryPrice * (1 - (tpFixedPct + tpTrailingPct) / 100);
-                    tpTrailingPnlRoi = (tpFixedPct + tpTrailingPct) * lev;
-                    tpTrailingPnlAmount = margin * (tpTrailingPnlRoi / 100);
-                } else {
-                    if (isLong) {
-                        const trailedSL = extremePrice - (entryPrice * (tpTrailingPct / 100));
-                        tpTrailingPrice = Math.max(tpFixedPrice, trailedSL);
-                        tpTrailingPnlRoi = ((tpTrailingPrice - entryPrice) / entryPrice) * 100 * lev;
-                    } else {
-                        const trailedSL = extremePrice + (entryPrice * (tpTrailingPct / 100));
-                        tpTrailingPrice = Math.min(tpFixedPrice, trailedSL);
-                        tpTrailingPnlRoi = ((entryPrice - tpTrailingPrice) / entryPrice) * 100 * lev;
-                    }
-                    tpTrailingPnlAmount = margin * (tpTrailingPnlRoi / 100);
-                }
+            let isReached = false;
+            if (enableTrailing && deepest) {
+                tpTrailingPrice = isLong ? deepest * (1 - tpTrailingPct / 100) : deepest * (1 + tpTrailingPct / 100);
+                const maxGainPct = isLong ? ((deepest - entryPrice) / entryPrice) * 100 : ((entryPrice - deepest) / entryPrice) * 100;
+                if (maxGainPct >= tpFixedPct) isReached = true;
             }
+
+            const slPnlAmount = isLong ? (slPrice - entryPrice) * posAmtAbs : (entryPrice - slPrice) * posAmtAbs;
+            const slPnlRoi = (slPnlAmount / margin) * 100;
+
+            const tpFixedPnlAmount = isLong ? (tpFixedPrice - entryPrice) * posAmtAbs : (entryPrice - tpFixedPrice) * posAmtAbs;
+            const tpFixedPnlRoi = (tpFixedPnlAmount / margin) * 100;
+
+            const tpTrailingPnlAmount = tpTrailingPrice > 0 ? (isLong ? (tpTrailingPrice - entryPrice) * posAmtAbs : (entryPrice - tpTrailingPrice) * posAmtAbs) : 0;
+            const tpTrailingPnlRoi = margin > 0 ? (tpTrailingPnlAmount / margin) * 100 : 0;
 
             let remainingMs = 0;
             if (userConfig.tradeMode === 'always') {
-                const targetCloseTime = openTime + (holdMins * 60000);
-                remainingMs = Math.max(0, targetCloseTime - Date.now());
+                const maxHoldMs = (userConfig.holdMinutes || 15) * 60 * 1000;
+                remainingMs = Math.max(0, (openTime + maxHoldMs) - Date.now());
             } else if (nextFundingTime) {
                 remainingMs = Math.max(0, nextFundingTime - (Date.now() + serverTimeOffset));
             }
 
             positionsRes.push({
-                coin: p.symbol,
-                side: sideStr,
-                size: formatNumber(posAmtAbs),
-                leverage: lev,
-                margin: margin,
-                pnl: pnl,
-                pctFromEntry: pctFromEntry,
-                entryPrice: entryPrice,
-                markPrice: markPrice,
-                openTime: openTime,
-                remainingMs: remainingMs,
-                holdMinutes: holdMins,
-                slPrice: slPrice,
-                slPnlRoi: slPnlRoi,
-                slPnlAmount: slPnlAmount,
-                tpFixedPrice: tpFixedPrice,
-                tpFixedPnlRoi: tpFixedPnlRoi,
-                tpFixedPnlAmount: tpFixedPnlAmount,
-                enableTrailing: enableTrailing,
-                isReached: isReached,
-                tpTrailingPct: tpTrailingPct,
-                extremePrice: extremePrice,
-                tpTrailingPrice: tpTrailingPrice,
-                tpTrailingPnlRoi: tpTrailingPnlRoi,
-                tpTrailingPnlAmount: tpTrailingPnlAmount,
-                type: posType
+                coin: p.symbol, side: sideStr, size: posAmtAbs, leverage: lev, margin, entryPrice, markPrice, pnl,
+                pctFromEntry, slPrice, slPnlAmount, slPnlRoi, tpFixedPrice, tpFixedPnlAmount, tpFixedPnlRoi,
+                enableTrailing, tpTrailingPrice, tpTrailingPnlAmount, tpTrailingPnlRoi, isReached, extremePrice: deepest,
+                openTime, posType, remainingMs, tpTrailingPct
             });
         }
-        
+
         cachedDashboardData = {
-            running: true, 
-            balance, 
-            totalWalletBalance, 
-            openOrders: openOrdersInfo.length, 
-            totalSessions: globalStats.totalSessions, 
-            totalPnl: globalStats.totalPnl, 
-            positions: positionsRes
+            running: true, balance, totalWalletBalance, openOrders: openOrdersInfo.length,
+            positions: positionsRes, totalSessions: globalStats.totalSessions, totalPnl: globalStats.totalPnl
         };
         lastDashboardFetchTime = now;
         return cachedDashboardData;
-    } catch (e) { 
-        return cachedDashboardData || { running: true, error: getErrorMessage(e) }; 
+    } catch (e) {
+        return { running: true, error: getErrorMessage(e) };
     }
 }
 
-function updateParamsFromQuery(query) {
-    let isUpdated = false;
-    if (query.apiKey !== undefined && query.apiKey.trim() !== '') { userConfig.apiKey = query.apiKey.trim(); isUpdated = true; }
-    if (query.secretKey !== undefined && query.secretKey.trim() !== '') { userConfig.secretKey = query.secretKey.trim(); isUpdated = true; }
-    if (query.amountMode) { userConfig.amountMode = query.amountMode; isUpdated = true; }
-    if (query.amountValue !== undefined && !isNaN(parseFloat(query.amountValue))) { userConfig.amountValue = parseFloat(query.amountValue); isUpdated = true; }
-    if (query.tpFixed !== undefined && !isNaN(parseFloat(query.tpFixed))) { userConfig.tpFixedPercent = parseFloat(query.tpFixed); isUpdated = true; } 
-    if (query.tp !== undefined && query.tpFixed === undefined && !isNaN(parseFloat(query.tp))) { userConfig.tpFixedPercent = parseFloat(query.tp); isUpdated = true; }
-    if (query.enableTrailing !== undefined) { userConfig.enableTrailing = query.enableTrailing === 'true' || query.enableTrailing === true; isUpdated = true; }
-    if (query.tpTrailing !== undefined && !isNaN(parseFloat(query.tpTrailing))) { userConfig.tpTrailingPercent = parseFloat(query.tpTrailing); isUpdated = true; }
-    if (query.sl !== undefined && !isNaN(parseFloat(query.sl))) { userConfig.slPercent = parseFloat(query.sl); isUpdated = true; }
-    if (query.longMs !== undefined && query.longMs !== '') { userConfig.longOffsetMs = parseInt(query.longMs); isUpdated = true; }
-    if (query.shortMs !== undefined && query.shortMs !== '') { userConfig.shortOffsetMs = parseInt(query.shortMs); isUpdated = true; }
-    if (query.threshold !== undefined && query.threshold !== '') { userConfig.fundingThreshold = parseFloat(query.threshold); isUpdated = true; }
-    if (query.tradeMode) { tradeMode: query.tradeMode; isUpdated = true; }
-    if (query.sortMode) { userConfig.sortMode = query.sortMode; isUpdated = true; }
-    if (query.holdMinutes !== undefined && query.holdMinutes !== '' && !isNaN(parseFloat(query.holdMinutes))) { userConfig.holdMinutes = parseFloat(query.holdMinutes); isUpdated = true; }
-    if (query.enableAlwaysPriceTrigger !== undefined) { userConfig.enableAlwaysPriceTrigger = query.enableAlwaysPriceTrigger === 'true' || query.enableAlwaysPriceTrigger === true; isUpdated = true; }
-    if (query.alwaysPriceChangePct !== undefined && !isNaN(parseFloat(query.alwaysPriceChangePct))) { userConfig.alwaysPriceChangePct = parseFloat(query.alwaysPriceChangePct); isUpdated = true; }
-    return isUpdated;
-}
+const app = express();
+app.use(express.static(__dirname));
 
-async function startBotLogicInternal(query) {
-    if (botRunning) return 'Bot đã đang chạy.';
-    const isUpdated = updateParamsFromQuery(query);
+app.get('/api/config', (req, res) => {
+    res.json(userConfig);
+});
 
-    if (isUpdated) { saveConfigToFile(); }
-    cachedDashboardData = null;
+app.get('/api/save_config', (req, res) => {
+    const { apiKey, secretKey, amountMode, amountValue, tpFixed, enableTrailing, tpTrailing, sl, shortMs, threshold, tradeMode, sortMode, holdMinutes, enableAlwaysPriceTrigger, alwaysPriceTriggerPct } = req.query;
+
+    if (apiKey) userConfig.apiKey = apiKey;
+    if (secretKey) userConfig.secretKey = secretKey;
+    if (amountMode) userConfig.amountMode = amountMode;
+    if (amountValue) userConfig.amountValue = parseFloat(amountValue);
+    if (tpFixed) userConfig.tpFixedPercent = parseFloat(tpFixed);
+    userConfig.enableTrailing = enableTrailing === 'true';
+    if (tpTrailing) userConfig.tpTrailingPercent = parseFloat(tpTrailing);
+    if (sl) userConfig.slPercent = parseFloat(sl);
+    if (shortMs !== undefined) userConfig.shortOffsetMs = parseInt(shortMs);
+    if (threshold) userConfig.fundingThreshold = parseFloat(threshold);
+    if (tradeMode) userConfig.tradeMode = tradeMode;
+    if (sortMode) userConfig.sortMode = sortMode;
+    if (holdMinutes) userConfig.holdMinutes = parseInt(holdMinutes);
+    userConfig.enableAlwaysPriceTrigger = enableAlwaysPriceTrigger === 'true';
+    if (alwaysPriceTriggerPct) userConfig.alwaysPriceTriggerPct = parseFloat(alwaysPriceTriggerPct);
+
+    saveConfigToFile();
+    log('SUCCESS', 'CONFIG', '💾 Đã lưu cấu hình vào tệp config.json!');
+    res.send("Saved");
+});
+
+app.get('/api/start', async (req, res) => {
+    const { apiKey, secretKey, amountMode, amountValue, tpFixed, enableTrailing, tpTrailing, sl, shortMs, threshold, tradeMode, sortMode, holdMinutes, enableAlwaysPriceTrigger, alwaysPriceTriggerPct } = req.query;
+
+    if (apiKey) userConfig.apiKey = apiKey;
+    if (secretKey) userConfig.secretKey = secretKey;
+    if (amountMode) userConfig.amountMode = amountMode;
+    if (amountValue) userConfig.amountValue = parseFloat(amountValue);
+    if (tpFixed) userConfig.tpFixedPercent = parseFloat(tpFixed);
+    userConfig.enableTrailing = enableTrailing === 'true';
+    if (tpTrailing) userConfig.tpTrailingPercent = parseFloat(tpTrailing);
+    if (sl) userConfig.slPercent = parseFloat(sl);
+    if (shortMs !== undefined) userConfig.shortOffsetMs = parseInt(shortMs);
+    if (threshold) userConfig.fundingThreshold = parseFloat(threshold);
+    if (tradeMode) userConfig.tradeMode = tradeMode;
+    if (sortMode) userConfig.sortMode = sortMode;
+    if (holdMinutes) userConfig.holdMinutes = parseInt(holdMinutes);
+    userConfig.enableAlwaysPriceTrigger = enableAlwaysPriceTrigger === 'true';
+    if (alwaysPriceTriggerPct) userConfig.alwaysPriceTriggerPct = parseFloat(alwaysPriceTriggerPct);
+
+    saveConfigToFile();
+
+    if (!botRunning) {
+        botRunning = true;
+        botStartTime = Date.now();
+        alwaysPriceLocks = {};
+        log('SUCCESS', 'BOT', `▶ BOT KHỞI ĐỘNG CHẾ ĐỘ: ${userConfig.tradeMode.toUpperCase()}`);
+        startAntiLiquidationMonitor();
+        armT2MinuteScheduler();
+    }
+    res.send("OK");
+});
+
+app.get('/api/stop', (req, res) => {
+    botRunning = false;
+    clearTimeout(schedulerTimeout);
+    clearTimeout(scheduledMainTimeout);
+    if (antiLiquidationInterval) clearInterval(antiLiquidationInterval);
+    alwaysPriceLocks = {};
+    log('WARN', 'BOT', '⏹ BOT ĐÃ DỪNG HOẠT ĐỘNG!');
+    saveStateToFile();
+    res.send("OK");
+});
+
+app.get('/api/status', (req, res) => {
+    res.send(botRunning ? "Status: RUNNING" : "Status: STOPPED");
+});
+
+app.get('/api/logs', (req, res) => {
+    res.json(memoryLogs);
+});
+
+app.get('/api/funding_rates', async (req, res) => {
+    try {
+        const data = await fetchFundingDataFromBinance();
+        res.json(data);
+    } catch (e) {
+        res.json([]);
+    }
+});
+
+app.get('/api/dashboard', async (req, res) => {
+    const data = await getDashboardDataCached();
+    res.json(data);
+});
+
+app.get('/api/force_close', async (req, res) => {
+    const { symbol, side } = req.query;
+    if (!symbol || !side) return res.status(400).send("Thiếu tham số");
+
+    const matchMain = currentMainPositions.find(p => p.symbol === symbol && p.side === side);
+
+    if (matchMain) {
+        await closeMainInternal(matchMain, 'Đóng thủ công Web', matchMain.isTest);
+        return res.send(`Đã đóng vị thế Main ${side} ${symbol}`);
+    }
+
+    try {
+        await aggressiveCleanup(symbol);
+        res.send(`Đã giải phóng thủ công vị thế ${side} ${symbol}`);
+    } catch (e) {
+        res.status(500).send("Lỗi: " + e.message);
+    }
+});
+
+app.get('/api/test_fast', async (req, res) => {
+    if (!botRunning) return res.send("Bot đang tắt");
+    try {
+        const allFunding = await fetchFundingDataFromBinance(true);
+        const candidates = getFilteredCandidates(allFunding, userConfig.fundingThreshold);
+        if (candidates.length === 0) return res.send("Không có coin thỏa mãn threshold");
+
+        const best = candidates[0];
+        const leverage = best.lev;
+        await setLeverage(best.symbol, leverage);
+        await ensureCrossMargin(best.symbol);
+        await aggressiveCleanup(best.symbol);
+
+        const acc = await callSignedAPI('/fapi/v2/account', 'GET');
+        const balance = parseFloat(acc.assets.find(a => a.asset === 'USDT')?.availableBalance || 0);
+
+        const symbolInfo = exchangeInfoCache[best.symbol];
+        const currentPrice = await getCurrentPrice(best.symbol);
+        
+        let initialMargin = userConfig.amountMode === 'percent' ? balance * (userConfig.amountValue / 100) : userConfig.amountValue;
+        let quantity = calculateValidQuantity(symbolInfo, currentPrice, initialMargin, leverage);
+
+        const isNegative = best.fdType === 'negative';
+        const mainSide = isNegative ? 'SHORT' : 'LONG';
+
+        log('INFO', 'TEST', `⚡ Khởi chạy Test Nhanh mở lệnh Main ${mainSide} cho ${best.symbol}`);
+        await openMainPosition(best.symbol, quantity, best.nextFundingTime, mainSide, true, best.estPnl);
+        res.send(`Đã chạy Test Nhanh lệnh Main ${mainSide} ${best.symbol}`);
+    } catch (e) {
+        res.send("Lỗi test: " + getErrorMessage(e));
+    }
+});
+
+app.listen(WEB_SERVER_PORT, async () => {
+    loadConfigFromFile();
+    console.log(`==================================================`);
+    console.log(`  Binance Bot Web Dashboard running at http://localhost:${WEB_SERVER_PORT}`);
+    console.log(`==================================================`);
+    
     try {
         await syncServerTime();
         await updateAllLeverageCache();
         await getExchangeInfo();
-        botRunning = true; 
-        botStartTime = new Date();
-        saveStateToFile();
-        startAntiLiquidationMonitor();
-        armT2MinuteScheduler();
-        return 'Bot Khởi Động Thành Công.';
-    } catch (e) { return 'Lỗi Khởi Động: ' + getErrorMessage(e); }
-}
-
-function stopBotLogicInternal() {
-    botRunning = false;
-    cachedDashboardData = null;
-    clearTimeout(schedulerTimeout);
-    clearTimeout(scheduledBufferTimeout);
-    clearTimeout(scheduledMainTimeout);
-    if(mainCheckInterval) clearInterval(mainCheckInterval);
-    if(bufferCheckInterval) clearInterval(bufferCheckInterval);
-    if(antiLiquidationInterval) clearInterval(antiLiquidationInterval);
-    saveStateToFile();
-    return 'Bot Đã Dừng.';
-}
-
-loadConfigFromFile();
-loadStateFromFile();
-
-memoryLogs.length = 0;
-globalStats.totalSessions = 0;
-globalStats.totalPnl = 0;
-saveStateToFile();
+        await restoreActivePositionsOnStartup();
+    } catch (e) {}
+});
