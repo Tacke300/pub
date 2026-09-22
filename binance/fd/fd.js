@@ -138,7 +138,7 @@ const MAX_LOG_SIZE = 1000;
 const logCounts = {};
 const LOG_COOLDOWN_MS = 60000;
 
-const WEB_SERVER_PORT = 9999;
+const WEB_SERVER_PORT = 9998;
 
 let globalStats = {
     totalSessions: 0,
