@@ -207,7 +207,7 @@
                 </div>
             </div>
             <div class="input-group">
-                <div class="input-label">Ngưỡng điều kiện (Lọc >= Tiêu chí trên)</div>
+                <div class="input-label">Ngưỡng điều kiện (Lọc >= Tiêu chí trên - Cả Âm & Dương)</div>
                 <input type="number" step="0.1" id="fundingThresholdVal" value="10" placeholder="VD: 10 => Mức lọc %">
             </div>
         </div>
@@ -216,8 +216,7 @@
             <div class="input-group">
                 <div class="input-label">Chế độ giao dịch</div>
                 <div class="radio-group">
-                    <label class="radio-item"><input type="radio" name="tradeMode" value="both" checked> Cả 2</label>
-                    <label class="radio-item"><input type="radio" name="tradeMode" value="main"> Chỉ Main (Before)</label>
+                    <label class="radio-item"><input type="radio" name="tradeMode" value="main" checked> Chế Độ Before Funding</label>
                     <label class="radio-item"><input type="radio" name="tradeMode" value="always"> Chế Độ Always</label>
                 </div>
             </div>
@@ -239,12 +238,8 @@
 
         <div class="row" style="margin-top: 10px;">
             <div class="input-group">
-                <div class="input-label">Mở Lệnh Buffer/Long / Before Funding (ms)</div>
-                <input type="number" id="longOffset" value="1500" placeholder="Mặc định: 1500">
-            </div>
-            <div class="input-group">
-                <div class="input-label">Mở Lệnh Main (Before) / Sau Funding (ms)</div>
-                <input type="number" id="shortOffset" value="0" placeholder="Mặc định: 0">
+                <div class="input-label">Thời Gian Mở Lệnh Before Funding (ms sau FD)</div>
+                <input type="number" id="shortOffset" value="0" placeholder="Mặc định: 0 (ms sau FD)">
             </div>
             <div class="input-group">
                 <div class="input-label">Thời Gian Giữ Lệnh Chế Độ Always (Phút)</div>
@@ -256,10 +251,10 @@
             <div class="input-group">
                 <div class="input-label">
                     <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #EAECEF;">
-                        <input type="checkbox" id="enableAlwaysPriceTrigger"> <b>Bật % Biến Động Giá Open Always</b>
+                        <input type="checkbox" id="enableAlwaysPriceTrigger"> <b>Bật Kích Hoạt % Biến Động Giá (Always)</b>
                     </label>
                 </div>
-                <input type="number" step="0.1" id="alwaysPriceChangePctVal" value="5" placeholder="VD: 5 => Giá chạy thêm 5% từ lúc đạt FD mới mở">
+                <input type="number" step="0.1" id="alwaysPriceTriggerPct" value="5" placeholder="VD: 5 => Giá tăng/giảm 5% mới mở lệnh">
             </div>
         </div>
 
@@ -281,7 +276,7 @@
                 <input type="number" step="0.1" id="slVal" value="2">
             </div>
         </div>
-        <div class="helper-text">* SL, TP Cứng và Trailing TP được tính theo % biến động GIÁ ENTRY. Chống thanh lý bật tự động: Đóng toàn bộ khi Margin / Khả dụng <= 15% Balance. Tất cả lệnh đều ép tài khoản về chế độ CROSS.</div>
+        <div class="helper-text">* FD Dương mở Long, FD Âm mở Short. SL, TP Cứng và Trailing TP được tính theo % biến động GIÁ ENTRY. Chống thanh lý bật tự động: Đóng toàn bộ khi Margin / Khả dụng <= 15% Balance. Tất cả lệnh đều ép tài khoản về chế độ CROSS.</div>
     </div>
 
     <div class="button-row">
@@ -325,17 +320,16 @@
                 document.getElementById('amountVal').value = config.amountValue;
                 if(config.amountMode) document.querySelector(`input[name="amountMode"][value="${config.amountMode}"]`).checked = true;
                 if(config.tradeMode) {
-                    const targetMode = (config.tradeMode === 'buffer' || config.tradeMode === 'after') ? 'both' : config.tradeMode;
+                    const targetMode = (config.tradeMode === 'always') ? 'always' : 'main';
                     const radio = document.querySelector(`input[name="tradeMode"][value="${targetMode}"]`);
                     if(radio) radio.checked = true;
                 }
                 if(config.sortMode) document.querySelector(`input[name="sortMode"][value="${config.sortMode}"]`).checked = true;
                 
-                document.getElementById('longOffset').value = config.longOffsetMs !== undefined ? config.longOffsetMs : 1500;
                 document.getElementById('shortOffset').value = config.shortOffsetMs !== undefined ? config.shortOffsetMs : 0;
                 document.getElementById('holdMinutesVal').value = config.holdMinutes || 15;
                 document.getElementById('enableAlwaysPriceTrigger').checked = !!config.enableAlwaysPriceTrigger;
-                document.getElementById('alwaysPriceChangePctVal').value = config.alwaysPriceChangePct || 5;
+                document.getElementById('alwaysPriceTriggerPct').value = config.alwaysPriceTriggerPct !== undefined ? config.alwaysPriceTriggerPct : 5;
                 document.getElementById('tpFixedVal').value = config.tpFixedPercent || config.tpPercent || 1;
                 document.getElementById('enableTrailing').checked = !!config.enableTrailing;
                 document.getElementById('tpTrailingVal').value = config.tpTrailingPercent || 1;
@@ -521,16 +515,15 @@
         const enableTrailing = document.getElementById('enableTrailing').checked;
         const tpTrailing = document.getElementById('tpTrailingVal').value;
         const sl = document.getElementById('slVal').value;
-        const longMs = document.getElementById('longOffset').value;
         const shortMs = document.getElementById('shortOffset').value;
         const threshold = document.getElementById('fundingThresholdVal').value;
-        const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
+        const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'main';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
         const holdMinutes = document.getElementById('holdMinutesVal').value;
         const enableAlwaysPriceTrigger = document.getElementById('enableAlwaysPriceTrigger').checked;
-        const alwaysPriceChangePct = document.getElementById('alwaysPriceChangePctVal').value;
+        const alwaysPriceTriggerPct = document.getElementById('alwaysPriceTriggerPct').value;
 
-        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceChangePct=${alwaysPriceChangePct}`;
+        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceTriggerPct=${alwaysPriceTriggerPct}`;
         await fetch(url);
         fetchStatus();
     }
@@ -549,16 +542,15 @@
         const enableTrailing = document.getElementById('enableTrailing').checked;
         const tpTrailing = document.getElementById('tpTrailingVal').value;
         const sl = document.getElementById('slVal').value;
-        const longMs = document.getElementById('longOffset').value;
         const shortMs = document.getElementById('shortOffset').value;
         const threshold = document.getElementById('fundingThresholdVal').value;
-        const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
+        const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'main';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
         const holdMinutes = document.getElementById('holdMinutesVal').value;
         const enableAlwaysPriceTrigger = document.getElementById('enableAlwaysPriceTrigger').checked;
-        const alwaysPriceChangePct = document.getElementById('alwaysPriceChangePctVal').value;
+        const alwaysPriceTriggerPct = document.getElementById('alwaysPriceTriggerPct').value;
 
-        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceChangePct=${alwaysPriceChangePct}`;
+        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceTriggerPct=${alwaysPriceTriggerPct}`;
         await fetch(url);
         fetchStatus();
     }
