@@ -243,12 +243,23 @@
                 <input type="number" id="longOffset" value="1500" placeholder="Mặc định: 1500">
             </div>
             <div class="input-group">
-                <div class="input-label">Mở Lệnh Main/Short / Before Funding (ms)</div>
+                <div class="input-label">Mở Lệnh Main (Before) / Sau Funding (ms)</div>
                 <input type="number" id="shortOffset" value="0" placeholder="Mặc định: 0">
             </div>
             <div class="input-group">
                 <div class="input-label">Thời Gian Giữ Lệnh Chế Độ Always (Phút)</div>
                 <input type="number" id="holdMinutesVal" value="15" placeholder="Mặc định: 15 phút">
+            </div>
+        </div>
+
+        <div class="row" style="margin-top: 10px;">
+            <div class="input-group">
+                <div class="input-label">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #EAECEF;">
+                        <input type="checkbox" id="enableAlwaysPriceTrigger"> <b>Bật % Biến Động Giá Open Always</b>
+                    </label>
+                </div>
+                <input type="number" step="0.1" id="alwaysPriceChangePctVal" value="5" placeholder="VD: 5 => Giá chạy thêm 5% từ lúc đạt FD mới mở">
             </div>
         </div>
 
@@ -323,6 +334,8 @@
                 document.getElementById('longOffset').value = config.longOffsetMs !== undefined ? config.longOffsetMs : 1500;
                 document.getElementById('shortOffset').value = config.shortOffsetMs !== undefined ? config.shortOffsetMs : 0;
                 document.getElementById('holdMinutesVal').value = config.holdMinutes || 15;
+                document.getElementById('enableAlwaysPriceTrigger').checked = !!config.enableAlwaysPriceTrigger;
+                document.getElementById('alwaysPriceChangePctVal').value = config.alwaysPriceChangePct || 5;
                 document.getElementById('tpFixedVal').value = config.tpFixedPercent || config.tpPercent || 1;
                 document.getElementById('enableTrailing').checked = !!config.enableTrailing;
                 document.getElementById('tpTrailingVal').value = config.tpTrailingPercent || 1;
@@ -514,8 +527,10 @@
         const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
         const holdMinutes = document.getElementById('holdMinutesVal').value;
+        const enableAlwaysPriceTrigger = document.getElementById('enableAlwaysPriceTrigger').checked;
+        const alwaysPriceChangePct = document.getElementById('alwaysPriceChangePctVal').value;
 
-        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
+        const url = `/api/start?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceChangePct=${alwaysPriceChangePct}`;
         await fetch(url);
         fetchStatus();
     }
@@ -540,8 +555,10 @@
         const tradeMode = document.querySelector('input[name="tradeMode"]:checked')?.value || 'both';
         const sortMode = document.querySelector('input[name="sortMode"]:checked')?.value || 'pnl';
         const holdMinutes = document.getElementById('holdMinutesVal').value;
+        const enableAlwaysPriceTrigger = document.getElementById('enableAlwaysPriceTrigger').checked;
+        const alwaysPriceChangePct = document.getElementById('alwaysPriceChangePctVal').value;
 
-        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}`;
+        const url = `/api/save_config?apiKey=${encodeURIComponent(apiKey)}&secretKey=${encodeURIComponent(secretKey)}&amountMode=${amountMode}&amountValue=${amountValue}&tpFixed=${tpFixed}&enableTrailing=${enableTrailing}&tpTrailing=${tpTrailing}&sl=${sl}&longMs=${longMs}&shortMs=${shortMs}&threshold=${threshold}&tradeMode=${tradeMode}&sortMode=${sortMode}&holdMinutes=${holdMinutes}&enableAlwaysPriceTrigger=${enableAlwaysPriceTrigger}&alwaysPriceChangePct=${alwaysPriceChangePct}`;
         await fetch(url);
         fetchStatus();
     }
